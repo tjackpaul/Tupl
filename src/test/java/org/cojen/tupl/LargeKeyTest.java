@@ -1,17 +1,18 @@
 /*
- *  Copyright 2014-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -40,7 +41,7 @@ public class LargeKeyTest {
 
     @After
     public void teardown() throws Exception {
-        deleteTempDatabases();
+        deleteTempDatabases(getClass());
     }
 
     @Test
@@ -83,7 +84,7 @@ public class LargeKeyTest {
 
         byte[] value = new byte[0];
 
-        final int max = Math.min(16383, (pageSize / 2) - 22);
+        final int max = Math.min(16383, ((pageSize - 22) >> 1) - 13);
 
         byte[][] keys = new byte[1000][];
         Random rnd = new Random(87324);
@@ -150,7 +151,8 @@ public class LargeKeyTest {
 
     @Test
     public void veryLargeKeys() throws Exception {
-        Database db = newTempDatabase(decorate(new DatabaseConfig().checkpointRate(-1, null)));
+        Database db = newTempDatabase
+            (getClass(), decorate(new DatabaseConfig().checkpointRate(-1, null)));
         Index ix = db.openIndex("test");
 
         final int seed = 23423;
@@ -198,7 +200,7 @@ public class LargeKeyTest {
 
     @Test
     public void updateAgainstLargeKeys() throws Exception {
-        Database db = newTempDatabase(decorate(new DatabaseConfig()));
+        Database db = newTempDatabase(getClass(), decorate(new DatabaseConfig()));
         Index ix = db.openIndex("test");
 
         final int seed = 1234567;
@@ -232,6 +234,40 @@ public class LargeKeyTest {
             System.arraycopy(key, 0, value, 0, amt);
             byte[] found = ix.load(Transaction.BOGUS, key);
             fastAssertArrayEquals(value, found);
+        }
+    }
+
+    @Test
+    public void unsafeRollback() throws Exception {
+        // Tests that large keys are stored fully expanded in the undo log. If not, the
+        // database appears to be corrupt when trying to reconstruct the key.
+
+        Database db = newTempDatabase(getClass(), decorate(new DatabaseConfig()));
+        Index ix = db.openIndex("test");
+ 
+        Random rnd = new Random(18732);
+ 
+        // Test with various key and value sizes.
+
+        int[] keySizes = {0, 50, 100, 2000, 4000, 10000, 1_000_000};
+        int[] valueSizes = {0, 50, 200, 4000, 10000};
+
+        for (int keySize : keySizes) {
+            for (int valueSize : valueSizes) {
+                byte[] key = randomStr(rnd, keySize);
+                byte[] value = randomStr(rnd, valueSize);
+                ix.store(null, key, value);
+ 
+                Transaction txn = db.newTransaction();
+                byte[] value2 = randomStr(rnd, valueSize);
+                ix.store(txn, key, value2);
+ 
+                ix.delete(Transaction.BOGUS, key);
+ 
+                txn.reset();
+ 
+                fastAssertArrayEquals(value, ix.load(null, key));
+            }
         }
     }
 }

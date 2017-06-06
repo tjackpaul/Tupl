@@ -1,24 +1,23 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
 
 import java.io.IOException;
-
-import java.util.Arrays;
 
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -202,7 +201,7 @@ final class PageQueue implements IntegerRef {
     /**
      * Initialize a restored queue. Caller must hold append and remove locks.
      */
-    void init(/*P*/ byte[] header, int offset) throws IOException {
+    void init(EventListener debugListener, /*P*/ byte[] header, int offset) throws IOException {
         mRemovePageCount = p_longGetLE(header, offset + I_REMOVE_PAGE_COUNT);
         mRemoveNodeCount = p_longGetLE(header, offset + I_REMOVE_NODE_COUNT);
 
@@ -211,6 +210,26 @@ final class PageQueue implements IntegerRef {
         mRemoveHeadFirstPageId = p_longGetLE(header, offset + I_REMOVE_HEAD_FIRST_PAGE_ID);
 
         mAppendHeadId = mAppendTailId = p_longGetLE(header, offset + I_APPEND_HEAD_ID);
+
+        if (debugListener != null) {
+            String type;
+            if (mAllocMode == ALLOC_NORMAL) {
+                type = mAggressive ? "Recycle" : "Regular";
+            } else {
+                type = "Reserve";
+            }
+
+            debugListener.notify(EventType.DEBUG, "%1$s free list REMOVE_PAGE_COUNT: %2$d",
+                                 type, mRemovePageCount);
+            debugListener.notify(EventType.DEBUG, "%1$s free list REMOVE_NODE_COUNT: %2$d",
+                                 type, mRemoveNodeCount);
+            debugListener.notify(EventType.DEBUG, "%1$s free list REMOVE_HEAD_ID: %2$d",
+                                 type, mRemoveHeadId);
+            debugListener.notify(EventType.DEBUG, "%1$s free list REMOVE_HEAD_OFFSET: %2$d",
+                                 type, mRemoveHeadOffset);
+            debugListener.notify(EventType.DEBUG, "%1$s free list REMOVE_HEAD_FIRST_PAGE_ID: %2$d",
+                                 type, mRemoveHeadFirstPageId);
+        }
 
         if (mRemoveHeadId == 0) {
             mRemoveStoppedId = mAppendHeadId;

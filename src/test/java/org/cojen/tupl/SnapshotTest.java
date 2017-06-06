@@ -1,17 +1,18 @@
 /*
- *  Copyright 2012-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -42,14 +43,51 @@ public class SnapshotTest {
     public void suspend() throws Exception {
         final int rateMillis = 500;
 
+        class Listener implements EventListener {
+            private int mCheckpointCount;
+
+            @Override
+            public void notify(EventType type, String message, Object... args) {
+                if (type == EventType.CHECKPOINT_COMPLETE) {
+                    synchronized (this) {
+                        mCheckpointCount++;
+                        notify();
+                    }
+                }
+            }
+
+            public synchronized int checkpointCount() {
+                return mCheckpointCount;
+            }
+
+            public synchronized void waitForNextCheckpoint(int initialCount) throws Exception {
+                if (mCheckpointCount > initialCount) {
+                    return;
+                }
+                long end = System.currentTimeMillis() + 60_000;
+                while (true) {
+                    wait(60_000);
+                    if (mCheckpointCount > initialCount) {
+                        return;
+                    }
+                    if (System.currentTimeMillis() >= end) {
+                        throw new Exception("Timed out");
+                    }
+                }
+            }
+        }
+
+        final Listener listener = new Listener();
+
         DatabaseConfig config = new DatabaseConfig()
             .directPageAccess(false)
             .checkpointRate(rateMillis, TimeUnit.MILLISECONDS)
             .checkpointSizeThreshold(0)
             .checkpointDelayThreshold(0, null)
-            .durabilityMode(DurabilityMode.NO_FLUSH);
+            .durabilityMode(DurabilityMode.NO_FLUSH)
+            .eventListener(listener);
         decorate(config);
-        Database db = newTempDatabase(config);
+        Database db = newTempDatabase(getClass(), config);
 
         Index ix = db.openIndex("suspend");
 
@@ -58,7 +96,7 @@ public class SnapshotTest {
         sleep(rateMillis * 2);
         db.close();
 
-        db = reopenTempDatabase(db, config);
+        db = reopenTempDatabase(getClass(), db, config);
 
         ix = db.openIndex("suspend");
         assertNull(ix.load(null, "hello".getBytes()));
@@ -69,7 +107,7 @@ public class SnapshotTest {
         db.checkpoint();
         db.close();
         
-        db = reopenTempDatabase(db, config);
+        db = reopenTempDatabase(getClass(), db, config);
 
         ix = db.openIndex("suspend");
         fastAssertArrayEquals("world".getBytes(), ix.load(null, "hello".getBytes()));
@@ -88,7 +126,7 @@ public class SnapshotTest {
         sleep(rateMillis * 2);
         db.close();
 
-        db = reopenTempDatabase(db, config);
+        db = reopenTempDatabase(getClass(), db, config);
 
         ix = db.openIndex("suspend");
         fastAssertArrayEquals("world".getBytes(), ix.load(null, "hello".getBytes()));
@@ -97,25 +135,26 @@ public class SnapshotTest {
         db.suspendCheckpoints();
         ix.store(Transaction.BOGUS, "hello".getBytes(), "universe".getBytes());
         sleep(rateMillis * 2);
+        int initialCount = listener.checkpointCount();
         db.resumeCheckpoints();
         db.resumeCheckpoints();
-        sleep(rateMillis * 2);
+        listener.waitForNextCheckpoint(initialCount);
         db.close();
 
-        db = reopenTempDatabase(db, config);
+        db = reopenTempDatabase(getClass(), db, config);
 
         ix = db.openIndex("suspend");
         fastAssertArrayEquals("universe".getBytes(), ix.load(null, "hello".getBytes()));
 
-        deleteTempDatabase(db);
+        deleteTempDatabase(getClass(), db);
     }
 
     @Test
     public void snapshot() throws Exception {
-        File base = newTempBaseFile();
-        File snapshotBase = newTempBaseFile();
+        File base = newTempBaseFile(getClass());
+        File snapshotBase = newTempBaseFile(getClass());
         snapshot(base, snapshotBase);
-        deleteTempDatabases();
+        deleteTempDatabases(getClass());
     }
 
     private void snapshot(File base, File snapshotBase) throws Exception {
@@ -191,6 +230,7 @@ public class SnapshotTest {
         s.close();
 
         t.join();
+        assertTrue(db.verify(null));
         db.close();
 
         assertEquals(expectedLength, snapshot.length());
@@ -204,6 +244,7 @@ public class SnapshotTest {
         decorate(restoredConfig);
 
         final Database restored = Database.open(restoredConfig);
+        assertTrue(restored.verify(null));
         final Index restoredIx = restored.openIndex("test1");
 
         for (int i=0; i<10000000; i++) {

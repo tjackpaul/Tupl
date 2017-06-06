@@ -1,22 +1,25 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
 
 import java.io.IOException;
+
+import java.util.Comparator;
 
 /**
  * Maintains a logical position in a {@link View}. Cursor instances can only be
@@ -51,6 +54,13 @@ public interface Cursor {
      * Returns the key ordering for this cursor.
      */
     public Ordering getOrdering();
+
+    /**
+     * Returns a comparator for the ordering of this view, or null if unordered.
+     */
+    public default Comparator<byte[]> getComparator() {
+        return null;
+    }
 
     /**
      * Link to a transaction, which can be null for auto-commit mode. All
@@ -162,7 +172,7 @@ public interface Cursor {
      * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public LockResult skip(long amount) throws IOException;
 
@@ -185,7 +195,7 @@ public interface Cursor {
      * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public default LockResult skip(long amount, byte[] limitKey, boolean inclusive)
         throws IOException
@@ -201,7 +211,7 @@ public interface Cursor {
      * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public LockResult next() throws IOException;
 
@@ -215,7 +225,7 @@ public interface Cursor {
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
      * @throws NullPointerException if limit key is null
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public default LockResult nextLe(byte[] limitKey) throws IOException {
         return ViewUtils.nextCmp(this, limitKey, 1);
@@ -231,7 +241,7 @@ public interface Cursor {
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
      * @throws NullPointerException if limit key is null
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public default LockResult nextLt(byte[] limitKey) throws IOException {
         return ViewUtils.nextCmp(this, limitKey, 0);
@@ -246,7 +256,7 @@ public interface Cursor {
      * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public LockResult previous() throws IOException;
 
@@ -261,7 +271,7 @@ public interface Cursor {
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
      * @throws NullPointerException if limit key is null
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public default LockResult previousGe(byte[] limitKey) throws IOException {
         return ViewUtils.previousCmp(this, limitKey, -1);
@@ -277,7 +287,7 @@ public interface Cursor {
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
      * @throws NullPointerException if limit key is null
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     public default LockResult previousGt(byte[] limitKey) throws IOException {
         return ViewUtils.previousCmp(this, limitKey, 0);
@@ -400,6 +410,94 @@ public interface Cursor {
     }
 
     /**
+     * Optimized version of the regular findGe method, which can perform fewer search steps if
+     * the given key is in close proximity to the current one. Even if not in close proximity,
+     * the find outcome is identical, although it may perform more slowly.
+     *
+     * <p>Ownership of the key instance transfers to the Cursor, and it must
+     * not be modified after calling this method.
+     *
+     * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#ACQUIRED
+     * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
+     * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
+     * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws NullPointerException if key is null
+     */
+    public default LockResult findNearbyGe(byte[] key) throws IOException {
+        LockResult result = findNearby(key);
+        if (value() == null) {
+            if (result == LockResult.ACQUIRED) {
+                link().unlock();
+            }
+            result = next();
+        }
+        return result;
+    }
+
+    /**
+     * Optimized version of the regular findGt method, which can perform fewer search steps if
+     * the given key is in close proximity to the current one. Even if not in close proximity,
+     * the find outcome is identical, although it may perform more slowly.
+     *
+     * <p>Ownership of the key instance transfers to the Cursor, and it must
+     * not be modified after calling this method.
+     *
+     * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#ACQUIRED
+     * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
+     * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
+     * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws NullPointerException if key is null
+     */
+    public default LockResult findNearbyGt(byte[] key) throws IOException {
+        ViewUtils.findNearbyNoLock(this, key);
+        return next();
+    }
+
+    /**
+     * Optimized version of the regular findLe method, which can perform fewer search steps if
+     * the given key is in close proximity to the current one. Even if not in close proximity,
+     * the find outcome is identical, although it may perform more slowly.
+     *
+     * <p>Ownership of the key instance transfers to the Cursor, and it must
+     * not be modified after calling this method.
+     *
+     * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#ACQUIRED
+     * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
+     * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
+     * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws NullPointerException if key is null
+     */
+    public default LockResult findNearbyLe(byte[] key) throws IOException {
+        LockResult result = findNearby(key);
+        if (value() == null) {
+            if (result == LockResult.ACQUIRED) {
+                link().unlock();
+            }
+            result = previous();
+        }
+        return result;
+    }
+
+    /**
+     * Optimized version of the regular findLt method, which can perform fewer search steps if
+     * the given key is in close proximity to the current one. Even if not in close proximity,
+     * the find outcome is identical, although it may perform more slowly.
+     *
+     * <p>Ownership of the key instance transfers to the Cursor, and it must
+     * not be modified after calling this method.
+     *
+     * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#ACQUIRED
+     * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
+     * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
+     * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws NullPointerException if key is null
+     */
+    public default LockResult findNearbyLt(byte[] key) throws IOException {
+        ViewUtils.findNearbyNoLock(this, key);
+        return previous();
+    }
+
+    /**
      * Moves the Cursor to a random entry, but not guaranteed to be chosen from
      * a uniform distribution. Cursor key and value are set to null if no
      * entries exist, and position will be undefined.
@@ -422,7 +520,7 @@ public interface Cursor {
      * <p>By default, this method simply calls load. Subclasses are encouraged to provide a
      * more efficient implementation.
      *
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#ACQUIRED
      * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
@@ -436,7 +534,7 @@ public interface Cursor {
      * Loads or reloads the value at the cursor's current position. Cursor value is set to null
      * if entry no longer exists, but the position remains unmodified.
      *
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#ACQUIRED
      * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
@@ -452,7 +550,7 @@ public interface Cursor {
      * instance as was provided to this method.
      *
      * @param value value to store; pass null to delete
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      * @throws ViewConstraintException if value is not permitted
      */
     public void store(byte[] value) throws IOException;
@@ -464,7 +562,7 @@ public interface Cursor {
      * optimization used by null transactions (auto-commit).
      *
      * @param value value to store; pass null to delete
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      * @throws ViewConstraintException if value is not permitted
      */
     public default void commit(byte[] value) throws IOException {
@@ -493,7 +591,7 @@ public interface Cursor {
      *
      * @param data non-null data to append
      * @throws NullPointerException if data is null
-     * @throws IllegalStateException if position is undefined at invocation time
+     * @throws UnpositionedCursorException if position is undefined at invocation time
      */
     //public void append(byte[] data) throws IOException;
 

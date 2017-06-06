@@ -1,17 +1,18 @@
 /*
- *  Copyright 2012-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -19,6 +20,7 @@ package org.cojen.tupl;
 import java.io.IOException;
 
 import java.util.Arrays;
+import java.util.Comparator;
 
 /**
  * Mapping of keys to values, in no particular order. Subclasses and
@@ -34,11 +36,79 @@ public interface View {
     public Ordering getOrdering();
 
     /**
+     * Returns a comparator for the ordering of this view, or null if unordered.
+     */
+    public default Comparator<byte[]> getComparator() {
+        return null;
+    }
+
+    /**
      * @param txn optional transaction for Cursor to {@link Cursor#link link} to
      * @return a new unpositioned cursor
      * @throws IllegalArgumentException if transaction belongs to another database instance
      */
     public Cursor newCursor(Transaction txn);
+
+    /**
+     * Returns a new scanner over this view.
+     *
+     * @param txn optional transaction for Scanner to use
+     * @return a new scanner positioned at the first entry in the view
+     * @throws IllegalArgumentException if transaction belongs to another database instance
+     */
+    public default Scanner newScanner(Transaction txn) throws IOException {
+        return new ViewScanner(this, newCursor(txn));
+    }
+
+    /**
+     * Returns a new updater over this view. When providing a transaction which acquires locks
+     * (or the transaction is null), upgradable locks are acquired for each entry visited by
+     * the updater. If the transaction lock mode is non-repeatable, any lock acquisitions for
+     * entries which are stepped over are released when moving to the next entry. Updates with
+     * a null transaction are auto-committed and become visible to other transactions as the
+     * updater moves along.
+     *
+     * @param txn optional transaction for Updater to use
+     * @return a new updater positioned at the first entry in the view
+     * @throws IllegalArgumentException if transaction belongs to another database instance
+     */
+    public default Updater newUpdater(Transaction txn) throws IOException {
+        if (txn == null) {
+            txn = newTransaction(null);
+            try {
+                return new ViewAutoCommitUpdater(this, newCursor(txn));
+            } catch (Throwable e) {
+                try {
+                    txn.exit();
+                } catch (Throwable e2) {
+                    Utils.suppress(e, e2);
+                }
+                throw e;
+            }
+        } else {
+            switch (txn.lockMode()) {
+            default:
+                return new ViewSimpleUpdater(this, newCursor(txn));
+            case REPEATABLE_READ:
+                return new ViewUpgradableUpdater(this, newCursor(txn));
+            case READ_COMMITTED:
+            case READ_UNCOMMITTED:
+                txn.enter();
+                txn.lockMode(LockMode.UPGRADABLE_READ);
+                return new ViewNonRepeatableUpdater(this, newCursor(txn));
+            }
+        }
+    }
+
+    /**
+     * Returns a new transaction which is compatible with this view. If the provided durability
+     * mode is null, a default mode is selected.
+     *
+     * @throws UnsupportedOperationException if not supported
+     */
+    public default Transaction newTransaction(DurabilityMode durabilityMode) {
+        throw new UnsupportedOperationException();
+    }
 
     /**
      * Non-transactionally counts the number of entries within the given range. Implementations
@@ -58,8 +128,8 @@ public interface View {
      * <p>If the entry must be locked, ownership of the key instance is transferred. The key
      * must not be modified after calling this method.
      *
-     * @param txn optional transaction; pass null for {@link
-     * LockMode#READ_COMMITTED READ_COMMITTED} locking behavior
+     * @param txn optional transaction; pass null for {@link LockMode#READ_COMMITTED
+     * READ_COMMITTED} locking behavior
      * @param key non-null key
      * @return copy of value, or null if entry doesn't exist
      * @throws NullPointerException if key is null
@@ -73,6 +143,25 @@ public interface View {
         } finally {
             c.reset();
         }
+    }
+
+    /**
+     * Checks if an entry for the given key exists. This method should be called only if the
+     * value doesn't need to be loaded or stored &mdash; calling exists and then calling a load
+     * or store method is typically less efficient than skipping the exists check entirely.
+     *
+     * <p>If the entry must be locked, ownership of the key instance is transferred. The key
+     * must not be modified after calling this method.
+     *
+     * @param txn optional transaction; pass null for {@link LockMode#READ_COMMITTED
+     * READ_COMMITTED} locking behavior
+     * @param key non-null key
+     * @return true if entry exists
+     * @throws NullPointerException if key is null
+     * @throws IllegalArgumentException if transaction belongs to another database instance
+     */
+    public default boolean exists(Transaction txn, byte[] key) throws IOException {
+        return load(txn, key) != null;
     }
 
     /**
@@ -93,6 +182,12 @@ public interface View {
         try {
             c.autoload(false);
             c.find(key);
+            if (c.key() == null) {
+                if (value == null) {
+                    return;
+                }
+                throw new ViewConstraintException();
+            }
             c.store(value);
         } finally {
             c.reset();
@@ -117,6 +212,12 @@ public interface View {
         Cursor c = newCursor(txn);
         try {
             c.find(key);
+            if (c.key() == null) {
+                if (value == null) {
+                    return null;
+                }
+                throw new ViewConstraintException();
+            }
             byte[] old = c.value();
             c.store(value);
             return old;
@@ -127,7 +228,7 @@ public interface View {
 
     /**
      * Associates a value with the given key, unless a corresponding value already
-     * exists. Equivalent to: <code>update(txn, key, null, value)</code>
+     * exists. Equivalent to: {@link #update update(txn, key, null, value)}
      *
      * <p>If the entry must be locked, ownership of the key instance is transferred. The key
      * must not be modified after calling this method.
@@ -163,6 +264,9 @@ public interface View {
         try {
             c.autoload(false);
             c.find(key);
+            if (c.key() == null) {
+                throw new ViewConstraintException();
+            }
             if (c.value() == null) {
                 return false;
             }
@@ -193,11 +297,17 @@ public interface View {
     {
         Cursor c = newCursor(txn);
         try {
+            c.autoload(oldValue != null);
             c.find(key);
+            if (c.key() == null) {
+                throw new ViewConstraintException();
+            }
             if (!Arrays.equals(c.value(), oldValue)) {
                 return false;
             }
-            c.store(newValue);
+            if (oldValue != null || newValue != null) {
+                c.store(newValue);
+            }
             return true;
         } finally {
             c.reset();
@@ -206,7 +316,7 @@ public interface View {
 
     /**
      * Unconditionally removes the entry associated with the given key. Equivalent to:
-     * <code>replace(txn, key, null)</code>
+     * {@link #replace replace(txn, key, null)}
      *
      * <p>If the entry must be locked, ownership of the key instance is transferred. The key
      * must not be modified after calling this method.
@@ -224,7 +334,7 @@ public interface View {
 
     /**
      * Removes the entry associated with the given key, but only if the given value
-     * matches. Equivalent to: <code>update(txn, key, value, null)</code>
+     * matches. Equivalent to: {@link #update update(txn, key, value, null)}
      *
      * <p>If the entry must be locked, ownership of the key instance is transferred. The key
      * must not be modified after calling this method.
@@ -242,6 +352,51 @@ public interface View {
     }
 
     /**
+     * Touch the given key as if calling {@link #load load}, but instead only acquiring any
+     * necessary locks. Method may return {@link LockResult#UNOWNED UNOWNED} if the key isn't
+     * supported by this view, or if the transaction {@link LockMode} doesn't retain locks.
+     *
+     * <p>If the entry must be locked, ownership of the key instance is transferred. The key
+     * must not be modified after calling this method.
+     *
+     * @param txn optional transaction; pass null for {@link LockMode#READ_COMMITTED
+     * READ_COMMITTED} locking behavior
+     * @param key non-null key
+     * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#ACQUIRED ACQUIRED}, {@link
+     * LockResult#OWNED_SHARED OWNED_SHARED}, {@link LockResult#OWNED_UPGRADABLE
+     * OWNED_UPGRADABLE}, or {@link LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws NullPointerException if key is null
+     * @throws IllegalArgumentException if transaction belongs to another database instance
+     */
+    public default LockResult touch(Transaction txn, byte[] key) throws LockFailureException {
+        // Default implementation isn't that great and should be overridden.
+
+        try {
+            LockMode mode;
+            if (txn == null) {
+                // There's no default way to lock/unlock a key when the transaction is null, so
+                // do an existence check and assume that a lock will be acquired and released.
+                exists(null, key);
+            } else if ((mode = txn.lockMode()) == LockMode.READ_COMMITTED) {
+                LockResult result = lockShared(txn, key);
+                if (result == LockResult.ACQUIRED) {
+                    txn.unlock();
+                }
+            } else if (!mode.noReadLock) {
+                if (mode == LockMode.UPGRADABLE_READ) {
+                    return lockUpgradable(txn, key);
+                } else {
+                    return lockShared(txn, key);
+                }
+            }
+        } catch (IOException e) {
+            // Suppress any failure to load or any ViewConstraintException.
+        }
+
+        return LockResult.UNOWNED;
+    }
+
+    /**
      * Explicitly acquire a shared lock for the given key, denying exclusive locks. Lock is
      * retained until the end of the transaction or scope.
      *
@@ -249,13 +404,15 @@ public interface View {
      * required. Ownership of the key instance is transferred, and so the key must not be
      * modified after calling this method.
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#INTERRUPTED INTERRUPTED}, {@link
      * LockResult#TIMED_OUT_LOCK TIMED_OUT_LOCK}, {@link LockResult#ACQUIRED
      * ACQUIRED}, {@link LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws IllegalArgumentException if transaction belongs to another database instance
      * @throws IllegalStateException if too many shared locks
      * @throws DeadlockException if deadlock was detected after waiting full timeout
      * @throws ViewConstraintException if key is not allowed
@@ -274,10 +431,12 @@ public interface View {
      * required. Ownership of the key instance is transferred, and so the key must not be
      * modified after calling this method.
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link LockResult#OWNED_SHARED
      * OWNED_SHARED}, {@link LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws IllegalArgumentException if transaction belongs to another database instance
      * @throws IllegalStateException if too many shared locks
      * @throws LockFailureException if interrupted or timed out
      * @throws DeadlockException if deadlock was detected after waiting full timeout
@@ -294,13 +453,15 @@ public interface View {
      * required. Ownership of the key instance is transferred, and so the key must not be
      * modified after calling this method.
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#ILLEGAL ILLEGAL}, {@link
      * LockResult#INTERRUPTED INTERRUPTED}, {@link LockResult#TIMED_OUT_LOCK
      * TIMED_OUT_LOCK}, {@link LockResult#ACQUIRED ACQUIRED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws IllegalArgumentException if transaction belongs to another database instance
      * @throws DeadlockException if deadlock was detected after waiting full timeout
      * @throws ViewConstraintException if key is not allowed
      */
@@ -318,9 +479,11 @@ public interface View {
      * required. Ownership of the key instance is transferred, and so the key must not be
      * modified after calling this method.
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link LockResult#OWNED_UPGRADABLE
      * OWNED_UPGRADABLE}, or {@link LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws IllegalArgumentException if transaction belongs to another database instance
      * @throws LockFailureException if interrupted, timed out, or illegal upgrade
      * @throws DeadlockException if deadlock was detected after waiting full timeout
      * @throws ViewConstraintException if key is not allowed
@@ -336,13 +499,15 @@ public interface View {
      * required. Ownership of the key instance is transferred, and so the key must not be
      * modified after calling this method.
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#ILLEGAL ILLEGAL}, {@link
      * LockResult#INTERRUPTED INTERRUPTED}, {@link LockResult#TIMED_OUT_LOCK
      * TIMED_OUT_LOCK}, {@link LockResult#ACQUIRED ACQUIRED}, {@link
      * LockResult#UPGRADED UPGRADED}, or {@link LockResult#OWNED_EXCLUSIVE
      * OWNED_EXCLUSIVE}
+     * @throws IllegalArgumentException if transaction belongs to another database instance
      * @throws DeadlockException if deadlock was detected after waiting full timeout
      * @throws ViewConstraintException if key is not allowed
      */
@@ -360,9 +525,11 @@ public interface View {
      * required. Ownership of the key instance is transferred, and so the key must not be
      * modified after calling this method.
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link LockResult#UPGRADED UPGRADED}, or
      * {@link LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws IllegalArgumentException if transaction belongs to another database instance
      * @throws LockFailureException if interrupted, timed out, or illegal upgrade
      * @throws DeadlockException if deadlock was detected after waiting full timeout
      * @throws ViewConstraintException if key is not allowed
@@ -376,6 +543,7 @@ public interface View {
      * @return {@link LockResult#UNOWNED UNOWNED}, {@link LockResult#OWNED_SHARED
      * OWNED_SHARED}, {@link LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
+     * @throws IllegalArgumentException if transaction belongs to another database instance
      * @throws ViewConstraintException if key is not allowed
      */
     public LockResult lockCheck(Transaction txn, byte[] key) throws ViewConstraintException;
@@ -512,6 +680,85 @@ public interface View {
      */
     public default View viewTransformed(Transformer transformer) {
         return TransformedView.apply(this, transformer);
+    }
+
+    /**
+     * Returns a view which represents the <i>set union</i> of this view and a second one. A
+     * union eliminates duplicate keys, by relying on a combiner to decide how to deal with
+     * them. If the combiner chooses to {@link Combiner#discard discard} duplicate keys, then
+     * the returned view represents the <i>symmetric set difference</i> instead.
+     *
+     * <p>Storing entries in the union is permitted, if the combiner supports {@link
+     * Combiner#separate separation}. The separator must supply at least one non-null value, or
+     * else a {@link ViewConstraintException} will be thrown.
+     *
+     * @param combiner combines common entries together; pass null to always choose the {@link
+     * Combiner#first first}
+     * @param second required second view in the union
+     * @throws NullPointerException if second view is null
+     * @throws IllegalArgumentException if the views don't define a consistent ordering, as
+     * specified by their comparators
+     */
+    public default View viewUnion(Combiner combiner, View second) {
+        if (combiner == null) {
+            combiner = Combiner.first();
+        }
+        return new UnionView(combiner, this, second);
+    }
+
+    /**
+     * Returns a view which represents the <i>set intersection</i> of this view and a second
+     * one. An intersection eliminates duplicate keys, by relying on a combiner to decide how
+     * to deal with them.
+     *
+     * <p>Storing entries in the intersection is permitted, if the combiner supports {@link
+     * Combiner#separate separation}. The separator must supply two non-null values, or else a
+     * {@link ViewConstraintException} will be thrown.
+     *
+     * @param combiner combines common entries together; pass null to always choose the {@link
+     * Combiner#first first}
+     * @param second required second view in the intersection
+     * @throws NullPointerException if second view is null
+     * @throws IllegalArgumentException if the views don't define a consistent ordering, as
+     * specified by their comparators
+     */
+    public default View viewIntersection(Combiner combiner, View second) {
+        if (combiner == null) {
+            combiner = Combiner.first();
+        }
+        return new IntersectionView(combiner, this, second);
+    }
+
+    /**
+     * Returns a view which represents the <i>set difference</i> of this view and a second
+     * one. A difference eliminates duplicate keys, by relying on a combiner to decide how to
+     * deal with them.
+     *
+     * <p>Storing entries in the difference is permitted, if the combiner supports {@link
+     * Combiner#separate separation}.  The separator must supply a non-null first value, or
+     * else a {@link ViewConstraintException} will be thrown.
+     *
+     * @param combiner combines common entries together; pass null to always {@link
+     * Combiner#discard discard} them
+     * @param second required second view in the difference
+     * @throws NullPointerException if second view is null
+     * @throws IllegalArgumentException if the views don't define a consistent ordering, as
+     * specified by their comparators
+     */
+    public default View viewDifference(Combiner combiner, View second) {
+        if (combiner == null) {
+            combiner = Combiner.discard();
+        }
+        return new DifferenceView(combiner, this, second);
+    }
+
+    /**
+     * Returns a view, backed by this one, which only provides the keys. Values are always
+     * represented as {@link Cursor#NOT_LOADED NOT_LOADED}, and attempting to store a value
+     * other than null causes a {@link ViewConstraintException} to be thrown.
+     */
+    public default View viewKeys() {
+        return new KeyOnlyView(this);
     }
 
     /**

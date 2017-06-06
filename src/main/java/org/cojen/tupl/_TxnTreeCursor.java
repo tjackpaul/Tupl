@@ -1,17 +1,18 @@
 /*
- *  Copyright 2014-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -33,6 +34,9 @@ final class _TxnTreeCursor extends _TreeCursor {
         super(tree);
     }
 
+    // Note: Replicated transactions (via redo logging) require undo logging for all
+    // operations, because rollback is required when commits are rejected.
+
     @Override
     public final void store(byte[] value) throws IOException {
         byte[] key = mKey;
@@ -43,11 +47,7 @@ final class _TxnTreeCursor extends _TreeCursor {
             if (txn == null) {
                 txn = mTree.mDatabase.newAlwaysRedoTransaction();
                 try {
-                    if (txn.lockMode() != LockMode.UNSAFE) {
-                        txn.lockExclusive(mTree.mId, key, keyHash());
-                    }
-                    store(txn, leafExclusive(), value);
-                    txn.commit();
+                    doCommit(true, txn, key, value);
                 } catch (Throwable e) {
                     txn.reset();
                     throw e;
@@ -65,32 +65,24 @@ final class _TxnTreeCursor extends _TreeCursor {
 
     @Override
     public final void commit(byte[] value) throws IOException {
-        _LocalTransaction txn = mTxn;
+        byte[] key = mKey;
+        ViewUtils.positionCheck(key);
 
-        if (txn == null) {
-            store(value);
-        } else if (txn.durabilityMode() == DurabilityMode.NO_REDO) {
-            byte[] key = mKey;
-            ViewUtils.positionCheck(key);
-            try {
-                doCommit(txn, key, value);
-            } catch (Throwable e) {
-                throw handleException(e, false);
+        try {
+            _LocalTransaction txn = mTxn;
+            if (txn == null) {
+                txn = mTree.mDatabase.newAlwaysRedoTransaction();
+                try {
+                    doCommit(true, txn, key, value);
+                } catch (Throwable e) {
+                    txn.reset();
+                    throw e;
+                }
+            } else {
+                doCommit(txn.durabilityMode() != DurabilityMode.NO_REDO, txn, key, value);
             }
-        } else {
-            // Cannot use optimizations here. Replicated transactions need rollback support for
-            // all operations, including the last one.
-
-            // TODO: Figure out how to still use the combo store-commit redo operations.
-
-            try {
-                store(value);
-            } catch (Throwable e) {
-                txn.reset(e);
-                throw e;
-            }
-
-            txn.commit();
+        } catch (Throwable e) {
+            throw handleException(e, false);
         }
     }
 }

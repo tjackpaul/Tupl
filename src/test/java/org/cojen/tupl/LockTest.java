@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -31,6 +32,7 @@ import org.junit.*;
 import static org.junit.Assert.*;
 
 import static org.cojen.tupl.LockResult.*;
+import static org.cojen.tupl.TestUtils.startAndWaitUntilBlocked;
 
 /**
  * 
@@ -500,6 +502,88 @@ public class LockTest {
     }
 
     @Test
+    public void downgrade2() throws Exception {
+        // Owner holds exclusive lock, one waiter is upgradable, the other is shared.
+        // Downgrading the owner allows both waiters to acquire the lock.
+        release2(true);
+    }
+
+    @Test
+    public void release2() throws Exception {
+        // Owner holds exclusive lock, one waiter is upgradable, the other is shared.
+        // Releasing the owner allows both waiters to acquire the lock.
+        release2(false);
+    }
+
+    private void release2(boolean downgrade) throws Exception {
+        Locker locker1 = new Locker(mManager);
+        Locker locker2 = new Locker(mManager);
+        Locker locker3 = new Locker(mManager);
+
+        assertEquals(LockResult.ACQUIRED, locker1.lockExclusive(0, k1, -1));
+
+        class Upgradable extends Thread {
+            volatile Throwable failed;
+            volatile LockResult result;
+
+            @Override
+            public void run() {
+                try {
+                    result = locker2.lockUpgradable(0, k1, -1);
+                } catch (Throwable e) {
+                    failed = e;
+                }
+            }
+        }
+
+        class Shared extends Thread {
+            volatile Throwable failed;
+            volatile LockResult result;
+
+            @Override
+            public void run() {
+                try {
+                    result = locker3.lockShared(0, k1, -1);
+                } catch (Throwable e) {
+                    failed = e;
+                }
+            }
+        }
+
+        Upgradable w1 = startAndWaitUntilBlocked(new Upgradable());
+        Shared w2 = startAndWaitUntilBlocked(new Shared());
+
+        assertNull(w1.result);
+        assertNull(w2.result);
+
+        if (downgrade) {
+            locker1.unlockToShared();
+        } else {
+            locker1.unlock();
+        }
+
+        w1.join();
+        w2.join();
+
+        assertNull(w1.failed);
+        assertNull(w2.failed);
+
+        assertEquals(LockResult.ACQUIRED, w1.result);
+        assertEquals(LockResult.ACQUIRED, w2.result);
+
+        int hash = LockManager.hash(0, k1);
+
+        if (downgrade) {
+            assertEquals(LockResult.OWNED_SHARED, mManager.check(locker1, 0, k1, hash));
+        } else {
+            assertEquals(LockResult.UNOWNED, mManager.check(locker1, 0, k1, hash));
+        }
+
+        assertEquals(LockResult.OWNED_UPGRADABLE, mManager.check(locker2, 0, k1, hash));
+        assertEquals(LockResult.OWNED_SHARED, mManager.check(locker3, 0, k1, hash));
+    }
+
+    @Test
     public void pileOfLocks() throws Exception {
         Locker locker = new Locker(mManager);
         for (int i=0; i<1000; i++) {
@@ -732,9 +816,29 @@ public class LockTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     public void fifo() throws Exception {
-        mExecutor = Executors.newCachedThreadPool();
+        for (int i=1;; i++) {
+            long start = System.nanoTime();
+            try {
+                fifo(10);
+                return;
+            } catch (AssertionError e) {
+                if (i == 10 || e.getMessage().indexOf("TIMED") < 0) {
+                    throw e;
+                }
+                // Tolerate unexpected long stalls which cause timeouts.
+                long end = System.nanoTime();
+                if ((end - start) < MEDIUM_TIMEOUT) {
+                    throw e;
+                }
+                teardown();
+                setup();
+            }
+        }
+    }
 
-        final int count = 10;
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private void fifo(final int count) throws Exception {
+        mExecutor = Executors.newCachedThreadPool();
 
         Locker[] lockers = new Locker[count];
         for (int i=0; i<count; i++) {
@@ -1073,8 +1177,12 @@ public class LockTest {
             locker.unlock();
             assertEquals(UNOWNED, locker.lockCheck(0, k2));
             assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
-            locker.unlockToUpgradable();
-            assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, k1));
+            try {
+                locker.unlockToUpgradable();
+                fail();
+            } catch (IllegalStateException e) {
+            }
+            assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
             locker.scopeExitAll();
             assertEquals(UNOWNED, locker.lockCheck(0, k1));
         }
@@ -1355,7 +1463,42 @@ public class LockTest {
         executor.shutdown();
     }
 
-    /*
+    @Test
+    public void doubleLockSharedWithExclusiveWaiter() throws Exception {
+        // Shared lock request must always check for existing ownership before blocking.
+
+        Locker locker1 = new Locker(mManager);
+
+        assertEquals(ACQUIRED, locker1.tryLockShared(0, k1, -1));
+
+        Thread t = new Thread(() -> {
+            try {
+                Locker locker2 = new Locker(mManager);
+                locker2.tryLockExclusive(0, k1, -1);
+            } catch (Exception e) {
+                // Bail.
+            }
+        });
+
+        t.start();
+
+        wait: {
+            for (int i=0; i<100; i++) {
+                if (t.getState() == Thread.State.WAITING) {
+                    break wait;
+                }
+                Thread.sleep(100);
+            }
+
+            fail("Thread not blocked waiting for lock");
+        }
+
+        assertEquals(LockResult.OWNED_SHARED, locker1.tryLockShared(0, k1, 10_000_000_000L));
+
+        locker1.scopeExitAll();
+        t.join();
+    }
+
     @Test
     public void illegalUnlock() throws Exception {
         Locker locker = new Locker(mManager);
@@ -1437,6 +1580,46 @@ public class LockTest {
     public void illegalUnlock5() throws Exception {
         Locker locker = new Locker(mManager);
 
+        locker.lockExclusive(0, k1, -1);
+        locker.scopeEnter();
+        locker.lockExclusive(0, k2, -1);
+        locker.unlock();
+
+        try {
+            locker.unlockToShared();
+            fail();
+        } catch (IllegalStateException e) {
+        }
+
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
+        assertEquals(UNOWNED, locker.lockCheck(0, k2));
+    }
+
+    @Test
+    public void illegalUnlock6() throws Exception {
+        Locker locker = new Locker(mManager);
+
+        locker.lockExclusive(0, k1, -1);
+        locker.lockExclusive(0, k2, -1);
+        locker.scopeEnter();
+        locker.lockExclusive(0, k3, -1);
+        locker.unlock();
+
+        try {
+            locker.unlockToShared();
+            fail();
+        } catch (IllegalStateException e) {
+        }
+
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k2));
+        assertEquals(UNOWNED, locker.lockCheck(0, k3));
+    }
+
+    @Test
+    public void illegalUnlock7() throws Exception {
+        Locker locker = new Locker(mManager);
+
         assertEquals(ACQUIRED, locker.tryLockExclusive(0, k1, -1));
         locker.scopeEnter();
         assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
@@ -1451,7 +1634,47 @@ public class LockTest {
     }
 
     @Test
-    public void illegalUnlock6() throws Exception {
+    public void illegalUnlock8() throws Exception {
+        Locker locker = new Locker(mManager);
+
+        locker.lockExclusive(0, k1, -1);
+        locker.scopeEnter();
+        locker.lockExclusive(0, k2, -1);
+        locker.unlock();
+
+        try {
+            locker.unlockToUpgradable();
+            fail();
+        } catch (IllegalStateException e) {
+        }
+
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
+        assertEquals(UNOWNED, locker.lockCheck(0, k2));
+    }
+
+    @Test
+    public void illegalUnlock9() throws Exception {
+        Locker locker = new Locker(mManager);
+
+        locker.lockExclusive(0, k1, -1);
+        locker.lockExclusive(0, k2, -1);
+        locker.scopeEnter();
+        locker.lockExclusive(0, k3, -1);
+        locker.unlock();
+
+        try {
+            locker.unlockToUpgradable();
+            fail();
+        } catch (IllegalStateException e) {
+        }
+
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k2));
+        assertEquals(UNOWNED, locker.lockCheck(0, k3));
+    }
+
+    @Test
+    public void illegalUnlock10() throws Exception {
         Locker locker = new Locker(mManager);
 
         assertEquals(ACQUIRED, locker.tryLockUpgradable(0, k1, -1));
@@ -1460,19 +1683,324 @@ public class LockTest {
         assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
         locker.scopeEnter();
         assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
-        locker.unlockToUpgradable(); // illegal
 
-        /*
-        assertEquals(ACQUIRED, locker.tryLockUpgradable(0, k1, -1));
+        try {
+            locker.unlockToUpgradable();
+            fail();
+        } catch (IllegalStateException e) {
+        }
+
+        assertEquals(OWNED_EXCLUSIVE, locker.tryLockUpgradable(0, k1, -1));
         locker.scopeEnter();
-        assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, k1));
-        assertEquals(UPGRADED, locker.tryLockExclusive(0, k1, -1));
         assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
-        locker.unlockToUpgradable(); // allowed
-        locker.unlock();
-        * /
+        assertEquals(OWNED_EXCLUSIVE, locker.tryLockExclusive(0, k1, -1));
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k1));
+
+        try {
+            locker.unlockToUpgradable();
+            fail();
+        } catch (IllegalStateException e) {
+        }
+
+        try {
+            locker.unlock();
+            fail();
+        } catch (IllegalStateException e) {
+        }
     }
-    */
+
+    @Test
+    public void unlockCombine() throws Exception {
+        Locker locker = new Locker(mManager);
+
+        try {
+            locker.unlockCombine();
+            fail();
+        } catch (IllegalStateException e) {
+        }
+
+        assertEquals(ACQUIRED, locker.lockShared(0, k1, -1));
+        locker.unlockCombine();
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+
+        // This pairing of acquire and upgrade works because its for the same lock, immediately
+        // upgraded.
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k1, -1));
+        assertEquals(UPGRADED, locker.lockExclusive(0, k1, -1));
+        locker.unlockCombine();
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+
+        // This pairing fails because another lock is in between.
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k1, -1));
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k2, -1));
+        assertEquals(UPGRADED, locker.lockExclusive(0, k1, -1));
+        try {
+            locker.unlockCombine();
+            fail();
+        } catch (IllegalStateException e) {
+            // Cannot combine an acquire with an upgrade
+        }
+        try {
+            locker.unlock();
+            fail();
+        } catch (IllegalStateException e) {
+            // Cannot unlock non-immediate upgrade
+        }
+        locker.scopeExit();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+        assertEquals(UNOWNED, locker.lockCheck(0, k2));
+
+        // This pairing works.
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k1, -1));
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k2, -1));
+        locker.unlockCombine();
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+        assertEquals(UNOWNED, locker.lockCheck(0, k2));
+
+        // This pairing of upgrades works.
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k1, -1));
+        assertEquals(UPGRADED, locker.lockExclusive(0, k1, -1));
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k2, -1));
+        assertEquals(UPGRADED, locker.lockExclusive(0, k2, -1));
+        locker.unlockCombine();
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+        assertEquals(UNOWNED, locker.lockCheck(0, k2));
+
+        // This pairing of upgrades doesn't work.
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k1, -1));
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k2, -1));
+        assertEquals(UPGRADED, locker.lockExclusive(0, k1, -1));
+        assertEquals(UPGRADED, locker.lockExclusive(0, k2, -1));
+        locker.unlockCombine();
+        try {
+            locker.unlock();
+            fail();
+        } catch (IllegalStateException e) {
+            // Cannot unlock non-immediate upgrade
+        }
+        locker.scopeExit();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+        assertEquals(UNOWNED, locker.lockCheck(0, k2));
+    }
+
+    @Test
+    public void unlockCombineMany() throws Exception {
+        Locker locker = new Locker(mManager);
+
+        for (int i=0; i<1000; i++) {
+            assertEquals(ACQUIRED, locker.lockShared(0, key("k" + i), -1));
+            locker.unlockCombine();
+        }
+        locker.unlock();
+        for (int i=0; i<1000; i++) {
+            assertEquals(UNOWNED, locker.lockCheck(0, key("k" + i)));
+        }
+
+        // Again, but with a lock which should remain.
+        assertEquals(ACQUIRED, locker.lockShared(0, k1, -1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(ACQUIRED, locker.lockShared(0, key("k" + i), -1));
+            if (i != 0) {
+                locker.unlockCombine();
+            }
+        }
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        locker.unlock();
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(UNOWNED, locker.lockCheck(0, key("k" + i)));
+        }
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+
+        // Again, with a lock which should remain, and a combined downgrade.
+        assertEquals(ACQUIRED, locker.lockShared(0, k1, -1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(ACQUIRED, locker.lockExclusive(0, key("k" + i), -1));
+            if (i != 0) {
+                locker.unlockCombine();
+            }
+        }
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        locker.unlockToUpgradable();
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, key("k" + i)));
+        }
+        locker.unlock();
+        for (int i=0; i<1000; i++) {
+            assertEquals(UNOWNED, locker.lockCheck(0, key("k" + i)));
+        }
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+
+        // Again, with a lock which should remain, and a combined downgrade to shared.
+        assertEquals(ACQUIRED, locker.lockShared(0, k1, -1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(ACQUIRED, locker.lockExclusive(0, key("k" + i), -1));
+            if (i != 0) {
+                locker.unlockCombine();
+            }
+        }
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        locker.unlockToShared();
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(OWNED_SHARED, locker.lockCheck(0, key("k" + i)));
+        }
+        locker.unlock();
+        for (int i=0; i<1000; i++) {
+            assertEquals(UNOWNED, locker.lockCheck(0, key("k" + i)));
+        }
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+
+        // Again, with a lock which should remain, a bunch of upgrades, and a combined downgrade.
+        assertEquals(ACQUIRED, locker.lockShared(0, k1, -1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(ACQUIRED, locker.lockUpgradable(0, key("k" + i), -1));
+            assertEquals(UPGRADED, locker.lockExclusive(0, key("k" + i), -1));
+            if (i != 0) {
+                locker.unlockCombine();
+            }
+        }
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        locker.unlockToUpgradable();
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        for (int i=0; i<1000; i++) {
+            assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, key("k" + i)));
+        }
+        locker.unlock();
+        for (int i=0; i<1000; i++) {
+            assertEquals(UNOWNED, locker.lockCheck(0, key("k" + i)));
+        }
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+    }
+
+    @Test
+    public void unlockCombineBlockOfOne() throws Exception {
+        // Tests combine logic for a lock block with one entry.
+
+        Locker locker = new Locker(mManager);
+
+        // This forms a block of two.
+        assertEquals(ACQUIRED, locker.lockShared(0, k1, -1));
+        assertEquals(ACQUIRED, locker.lockShared(0, k2, -1));
+
+        // Unlock the last, leaving a block with one entry.
+        locker.unlock();
+
+        // Combine shouldn't do anything.
+        locker.unlockCombine();
+        
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        assertEquals(UNOWNED, locker.lockCheck(0, k2));
+
+        locker.unlock();
+    }
+
+    @Test
+    public void unlockDowngradeBlockOfOne() throws Exception {
+        Locker locker = new Locker(mManager);
+
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k1, -1));
+
+        // After this, a block of 8 (initial size) should exist.
+        for (int i=0; i<7; i++) {
+            assertEquals(ACQUIRED, locker.lockShared(0, key("k" + i), -1));
+        }
+
+        // After this, a block of 1 should be stacked.
+        assertEquals(UPGRADED, locker.lockExclusive(0, k1, -1));
+
+        // This will unlock from a block of size 1, popping it off the stack.
+        locker.unlockToUpgradable();
+
+        assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, k1));
+
+        // Now unlock everything and verify along the way.
+
+        for (int i=7; --i>=0; ) {
+            assertEquals(OWNED_SHARED, locker.lockCheck(0, key("k" + i)));
+            locker.unlock();
+            assertEquals(UNOWNED, locker.lockCheck(0, key("k" + i)));
+        }
+
+        assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, k1));
+        locker.unlock();
+        assertEquals(UNOWNED, locker.lockCheck(0, k1));
+    }
+
+    @Test
+    public void unlockDowngradeGroup() throws Exception {
+        Locker locker = new Locker(mManager);
+
+        assertEquals(ACQUIRED, locker.lockShared(0, k1, -1));
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k2, -1));
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k3, -1));
+        assertEquals(ACQUIRED, locker.lockUpgradable(0, k4, -1));
+
+        assertEquals(UPGRADED, locker.lockExclusive(0, k2, -1));
+        assertEquals(UPGRADED, locker.lockExclusive(0, k3, -1));
+        locker.unlockCombine();
+        assertEquals(UPGRADED, locker.lockExclusive(0, k4, -1));
+        locker.unlockCombine();
+
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k2));
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k3));
+        assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, k4));
+
+        locker.unlockToUpgradable();
+
+        assertEquals(OWNED_SHARED, locker.lockCheck(0, k1));
+        assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, k2));
+        assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, k3));
+        assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, k4));
+
+        locker.scopeExit();
+
+        // Again with various sizes.
+        for (int size=1; size<=30; size++) {
+            for (int i=0; i<size; i++) {
+                assertEquals(ACQUIRED, locker.lockUpgradable(0, key("k" + i), -1));
+            }
+
+            for (int i=0; i<size; i++) {
+                assertEquals(UPGRADED, locker.lockExclusive(0, key("k" + i), -1));
+                if (i != 0) {
+                    locker.unlockCombine();
+                }
+            }
+
+            for (int i=0; i<size; i++) {
+                assertEquals(OWNED_EXCLUSIVE, locker.lockCheck(0, key("k" + i)));
+            }
+
+            locker.unlockToUpgradable();
+
+            for (int i=0; i<size; i++) {
+                assertEquals(OWNED_UPGRADABLE, locker.lockCheck(0, key("k" + i)));
+            }
+
+            for (int i=1; i<size; i++) {
+                locker.unlockCombine();
+            }
+
+            locker.unlock();
+
+            for (int i=0; i<size; i++) {
+                assertEquals(UNOWNED, locker.lockCheck(0, key("k" + i)));
+            }
+        }
+    }
 
     private long scheduleUnlock(final Locker locker, final long delayMillis) {
         return schedule(locker, delayMillis, 0);
