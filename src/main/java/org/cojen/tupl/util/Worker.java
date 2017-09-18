@@ -62,6 +62,10 @@ public class Worker {
 
     static {
         try {
+            // Reduce the risk of "lost unpark" due to classloading.
+            // https://bugs.openjdk.java.net/browse/JDK-8074773
+            Class<?> clazz = LockSupport.class;
+
             SIZE_OFFSET = UNSAFE.objectFieldOffset(Worker.class.getDeclaredField("mSize"));
             FIRST_OFFSET = UNSAFE.objectFieldOffset(Worker.class.getDeclaredField("mFirst"));
             LAST_OFFSET = UNSAFE.objectFieldOffset(Worker.class.getDeclaredField("mLast"));
@@ -196,12 +200,12 @@ public class Worker {
             // Keep trying before parking.
             for (int i=1; i<Latch.SPIN_LIMIT; i++) {
                 if (mSize <= 0) {
-                    return;
+                    break;
                 }
             }
             Thread.yield();
             if (mSize <= 0) {
-                return;
+                break;
             }
             mWaiter = Thread.currentThread();
             if (UNSAFE.compareAndSwapInt(this, STATE_OFFSET, THREAD_RUNNING, THREAD_BLOCKED)) {

@@ -48,7 +48,11 @@ public class Latch {
 
     static {
         try {
-            Class<?> clazz = Latch.class;
+            // Reduce the risk of "lost unpark" due to classloading.
+            // https://bugs.openjdk.java.net/browse/JDK-8074773
+            Class<?> clazz = LockSupport.class;
+
+            clazz = Latch.class;
             STATE_OFFSET = UNSAFE.objectFieldOffset(clazz.getDeclaredField("mLatchState"));
             FIRST_OFFSET = UNSAFE.objectFieldOffset(clazz.getDeclaredField("mLatchFirst"));
             LAST_OFFSET = UNSAFE.objectFieldOffset(clazz.getDeclaredField("mLatchLast"));
@@ -245,7 +249,7 @@ public class Latch {
                     if (first instanceof Shared) {
                         // TODO: can this be combined into one downgrade step?
                         downgrade();
-                        doReleaseShared(mLatchState);
+                        doReleaseShared();
                         return;
                     }
 
@@ -295,7 +299,7 @@ public class Latch {
         if (exclusive) {
             releaseExclusive();
         } else {
-            doReleaseShared(mLatchState);
+            releaseShared();
         }
     }
 
@@ -303,11 +307,11 @@ public class Latch {
      * Releases an exclusive or shared latch.
      */
     public final void releaseEither() {
-        int state = mLatchState;
-        if (state == EXCLUSIVE) {
+        // TODO: can be non-volatile read
+        if (mLatchState == EXCLUSIVE) {
             releaseExclusive();
         } else {
-            doReleaseShared(state);
+            releaseShared();
         }
     }
 
@@ -509,12 +513,14 @@ public class Latch {
      * Release a held shared latch.
      */
     public void releaseShared() {
-        doReleaseShared(mLatchState);
+        doReleaseShared();
     }
 
-    private void doReleaseShared(int state) {
+    private void doReleaseShared() {
         int trials = 0;
         while (true) {
+            int state = mLatchState;
+
             WaitNode last = mLatchLast;
             if (last == null) {
                 // No waiters, so release the latch.
@@ -544,7 +550,6 @@ public class Latch {
             }
 
             trials = spin(trials);
-            state = mLatchState;
         }
     }
 

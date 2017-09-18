@@ -124,6 +124,10 @@
 <dt>All Implemented Interfaces:</dt>
 <dd><a href="http://docs.oracle.com/javase/8/docs/api/java/io/Serializable.html?is-external=true" title="class or interface in java.io">Serializable</a></dd>
 </dl>
+<dl>
+<dt>Direct Known Subclasses:</dt>
+<dd><a href="../../../org/cojen/tupl/IncompleteRestoreException.html" title="class in org.cojen.tupl">IncompleteRestoreException</a></dd>
+</dl>
 <hr>
 <br>
 <pre>public class <span class="typeNameLabel">CorruptDatabaseException</span>
@@ -152,7 +156,14 @@ extends <a href="../../../org/cojen/tupl/DatabaseException.html" title="class in
 <th class="colOne" scope="col">Constructor and Description</th>
 </tr>
 <tr class="altColor">
+<td class="colOne"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/CorruptDatabaseException.html#CorruptDatabaseException--">CorruptDatabaseException</a></span>()</code>&nbsp;</td>
+</tr>
+<tr class="rowColor">
 <td class="colOne"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/CorruptDatabaseException.html#CorruptDatabaseException-java.lang.String-">CorruptDatabaseException</a></span>(<a href="http://docs.oracle.com/javase/8/docs/api/java/lang/String.html?is-external=true" title="class or interface in java.lang">String</a>&nbsp;message)</code>&nbsp;</td>
+</tr>
+<tr class="altColor">
+<td class="colOne"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/CorruptDatabaseException.html#CorruptDatabaseException-java.lang.String-java.lang.Throwable-">CorruptDatabaseException</a></span>(<a href="http://docs.oracle.com/javase/8/docs/api/java/lang/String.html?is-external=true" title="class or interface in java.lang">String</a>&nbsp;message,
+                        <a href="http://docs.oracle.com/javase/8/docs/api/java/lang/Throwable.html?is-external=true" title="class or interface in java.lang">Throwable</a>&nbsp;cause)</code>&nbsp;</td>
 </tr>
 <tr class="rowColor">
 <td class="colOne"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/CorruptDatabaseException.html#CorruptDatabaseException-java.lang.Throwable-">CorruptDatabaseException</a></span>(<a href="http://docs.oracle.com/javase/8/docs/api/java/lang/Throwable.html?is-external=true" title="class or interface in java.lang">Throwable</a>&nbsp;cause)</code>&nbsp;</td>
@@ -194,6 +205,15 @@ extends <a href="../../../org/cojen/tupl/DatabaseException.html" title="class in
 <!--   -->
 </a>
 <h3>Constructor Detail</h3>
+<a name="CorruptDatabaseException--">
+<!--   -->
+</a>
+<ul class="blockList">
+<li class="blockList">
+<h4>CorruptDatabaseException</h4>
+<pre>public&nbsp;CorruptDatabaseException()</pre>
+</li>
+</ul>
 <a name="CorruptDatabaseException-java.lang.String-">
 <!--   -->
 </a>
@@ -206,10 +226,20 @@ extends <a href="../../../org/cojen/tupl/DatabaseException.html" title="class in
 <a name="CorruptDatabaseException-java.lang.Throwable-">
 <!--   -->
 </a>
-<ul class="blockListLast">
+<ul class="blockList">
 <li class="blockList">
 <h4>CorruptDatabaseException</h4>
 <pre>public&nbsp;CorruptDatabaseException(<a href="http://docs.oracle.com/javase/8/docs/api/java/lang/Throwable.html?is-external=true" title="class or interface in java.lang">Throwable</a>&nbsp;cause)</pre>
+</li>
+</ul>
+<a name="CorruptDatabaseException-java.lang.String-java.lang.Throwable-">
+<!--   -->
+</a>
+<ul class="blockListLast">
+<li class="blockList">
+<h4>CorruptDatabaseException</h4>
+<pre>public&nbsp;CorruptDatabaseException(<a href="http://docs.oracle.com/javase/8/docs/api/java/lang/String.html?is-external=true" title="class or interface in java.lang">String</a>&nbsp;message,
+                                <a href="http://docs.oracle.com/javase/8/docs/api/java/lang/Throwable.html?is-external=true" title="class or interface in java.lang">Throwable</a>&nbsp;cause)</pre>
 </li>
 </ul>
 </li>

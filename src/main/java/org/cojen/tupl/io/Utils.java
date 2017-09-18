@@ -444,16 +444,22 @@ public class Utils {
      */
     public static void readFully(InputStream in, byte[] b, int off, int len) throws IOException {
         if (len > 0) {
-            while (true) {
-                int amt = in.read(b, off, len);
-                if (amt <= 0) {
-                    throw new EOFException();
-                }
-                if ((len -= amt) <= 0) {
-                    break;
-                }
-                off += amt;
+            doReadFully(in, b, off, len);
+        }
+    }
+
+    private static void doReadFully(InputStream in, byte[] b, int off, int len)
+        throws IOException
+    {
+        while (true) {
+            int amt = in.read(b, off, len);
+            if (amt <= 0) {
+                throw new EOFException();
             }
+            if ((len -= amt) <= 0) {
+                break;
+            }
+            off += amt;
         }
     }
 
@@ -605,6 +611,25 @@ public class Utils {
         }
 
         throw new CorruptDatabaseException(cause);
+    }
+
+    /**
+     * Closes a resource without throwing another exception.
+     *
+     * @param resource can be null
+     */
+    public static void closeQuietly(Closeable resource) {
+        closeQuietly(null, resource);
+    }
+
+    /**
+     * Closes a resource without throwing another exception.
+     *
+     * @param resource can be null
+     * @param cause passed to resource if it implements {@link CauseCloseable}
+     */
+    public static void closeQuietly(Closeable resource, Throwable cause) {
+        closeQuietly(null, resource, cause);
     }
 
     /**

@@ -141,7 +141,7 @@ class _TreeCursor implements CauseCloseable, Cursor {
         return compareUnsigned(lkey, 0, lkey.length, rkey, offset, length);
     }
 
-    protected final int keyHash() {
+    private int keyHash() {
         int hash = mKeyHash;
         if (hash == 0) {
             mKeyHash = hash = _LockManager.hash(mTree.mId, mKey);
@@ -2728,69 +2728,129 @@ class _TreeCursor implements CauseCloseable, Cursor {
         return false;
     }
 
-    @Override
-    public void store(byte[] value) throws IOException {
-        byte[] key = mKey;
-        ViewUtils.positionCheck(key);
+    /**
+     * @return 0: default behavior, 1: always undo, 2: never redo
+     */
+    protected int storeMode() {
+        return 0;
+    }
 
-        try {
-            final _LocalTransaction txn = mTxn;
-            if (txn == null) {
-                final _Locker locker = mTree.lockExclusiveLocal(key, keyHash());
-                try {
-                    store(txn, leafExclusive(), value);
-                } finally {
-                    locker.unlock();
-                }
-            } else {
+    @Override
+    public final void store(byte[] value) throws IOException {
+        final _LocalTransaction txn = mTxn;
+
+        if (txn == null) {
+            storeAutoCommit(value);
+        } else {
+            byte[] key = mKey;
+            ViewUtils.positionCheck(key);
+
+            try {
                 if (txn.lockMode() != LockMode.UNSAFE) {
                     txn.lockExclusive(mTree.mId, key, keyHash());
                 }
-                store(txn, leafExclusive(), value);
+                _CursorFrame leaf = leafExclusive();
+                final DurabilityMode dmode;
+                if (storeMode() <= 1 || (dmode = txn.durabilityMode()) == DurabilityMode.NO_REDO) {
+                    store(txn, leaf, value);
+                } else {
+                    // Never redo.
+                    txn.durabilityMode(DurabilityMode.NO_REDO);
+                    try {
+                        store(txn, leaf, value);
+                    } finally {
+                        txn.durabilityMode(dmode);
+                    }
+                }
+            } catch (Throwable e) {
+                throw handleException(e, false);
             }
-        } catch (Throwable e) {
-            throw handleException(e, false);
         }
     }
     
-    @Override
-    public void commit(byte[] value) throws IOException {
+    private void storeAutoCommit(byte[] value) throws IOException {
         byte[] key = mKey;
         ViewUtils.positionCheck(key);
 
         try {
-            final _LocalTransaction txn = mTxn;
-            if (txn == null) {
-                final _Locker locker = mTree.lockExclusiveLocal(key, keyHash());
-                try {
-                    store(txn, leafExclusive(), value);
-                } finally {
-                    locker.unlock();
-                }
+            final _LocalTransaction txn;
+            int mode = storeMode();
+            if (mode == 0) {
+                txn = null;
             } else {
-                doCommit(false, txn, key, value);
+                _LocalDatabase db = mTree.mDatabase;
+                if (mode == 1) {
+                    // Always undo.
+                    txn = db.newAlwaysRedoTransaction();
+                    try {
+                        txn.lockExclusive(mTree.mId, key, keyHash());
+                        txn.storeCommit(true, this, value);
+                        return;
+                    } catch (Throwable e) {
+                        txn.reset();
+                        throw e;
+                    }
+                } else {
+                    // Never redo, but still acquire the lock.
+                    txn = _LocalTransaction.BOGUS;
+                }
+            }
+
+            final _Locker locker = mTree.lockExclusiveLocal(key, keyHash());
+            try {
+                store(txn, leafExclusive(), value);
+            } finally {
+                locker.unlock();
             }
         } catch (Throwable e) {
             throw handleException(e, false);
         }
     }
 
-    /**
-     * @param requireUndo true if undo logging is required (when key has been locked)
-     * @param txn non-null
-     */
-    final void doCommit(boolean requireUndo, _LocalTransaction txn, byte[] key, byte[] value)
-        throws IOException
-    {
-        if (txn.lockMode() != LockMode.UNSAFE) {
-            txn.lockExclusive(mTree.mId, key, keyHash());
-            if (txn.mDurabilityMode != DurabilityMode.NO_REDO) {
-                txn.storeCommit(requireUndo, this, value);
-                return;
+    @Override
+    public final void commit(byte[] value) throws IOException {
+        final _LocalTransaction txn = mTxn;
+
+        if (txn == null) {
+            storeAutoCommit(value);
+        } else {
+            byte[] key = mKey;
+            ViewUtils.positionCheck(key);
+
+            try {
+                int mode = storeMode();
+                if (mode <= 1) {
+                    if (txn.lockMode() != LockMode.UNSAFE) {
+                        txn.lockExclusive(mTree.mId, key, keyHash());
+                        if (txn.mDurabilityMode != DurabilityMode.NO_REDO) {
+                            txn.storeCommit(mode != 0, this, value);
+                            return;
+                        }
+                    }
+                    store(txn, leafExclusive(), value);
+                } else {
+                    // Never redo.
+                    if (txn.lockMode() != LockMode.UNSAFE) {
+                        txn.lockExclusive(mTree.mId, key, keyHash());
+                    }
+                    _CursorFrame leaf = leafExclusive();
+                    final DurabilityMode dmode = txn.durabilityMode();
+                    if (dmode == DurabilityMode.NO_REDO) {
+                        store(txn, leaf, value);
+                    } else {
+                        txn.durabilityMode(DurabilityMode.NO_REDO);
+                        try {
+                            store(txn, leaf, value);
+                        } finally {
+                            txn.durabilityMode(dmode);
+                        }
+                    }
+                }
+                txn.commit();
+            } catch (Throwable e) {
+                throw handleException(e, false);
             }
         }
-        store(txn, leafExclusive(), value);
-        txn.commit();
     }
 
     @Override
@@ -2881,18 +2941,40 @@ class _TreeCursor implements CauseCloseable, Cursor {
     }
 
     /**
-     * Atomic find and store operation. Cursor must be in a reset state when called, and cursor
-     * is also reset as a side-effect.
+     * Atomic find and store operation. Cursor must be in a reset state when this method is
+     * called, and the caller must reset the cursor afterwards.
      *
      * @param key must not be null
      */
     final byte[] findAndStore(byte[] key, byte[] value) throws IOException {
+        mKey = key;
+        _LocalTransaction txn = mTxn;
+
         try {
-            mKey = key;
-            final _LocalTransaction txn = mTxn;
             if (txn == null) {
                 final int hash = _LockManager.hash(mTree.mId, key);
                 mKeyHash = hash;
+                int mode = storeMode();
+                if (mode != 0) {
+                    _LocalDatabase db = mTree.mDatabase;
+                    if (mode == 1) {
+                        // Always undo.
+                        txn = db.newAlwaysRedoTransaction();
+                        try {
+                            txn.lockExclusive(mTree.mId, key, hash);
+                            byte[] result = doFindAndStore(txn, key, value);
+                            txn.commit();
+                            return result;
+                        } catch (Throwable e) {
+                            txn.reset();
+                            throw e;
+                        }
+                    } else {
+                        // Never redo, but still acquire the lock.
+                        txn = _LocalTransaction.BOGUS;
+                    }
+                }
+
                 final _Locker locker = mTree.lockExclusiveLocal(key, hash);
                 try {
                     return doFindAndStore(txn, key, value);
@@ -2907,10 +2989,21 @@ class _TreeCursor implements CauseCloseable, Cursor {
                     mKeyHash = hash;
                     txn.lockExclusive(mTree.mId, key, hash);
                 }
-                return doFindAndStore(txn, key, value);
+                final DurabilityMode dmode;
+                if (storeMode() <= 1 || (dmode = txn.durabilityMode()) == DurabilityMode.NO_REDO) {
+                    return doFindAndStore(txn, key, value);
+                } else {
+                    // Never redo.
+                    txn.durabilityMode(DurabilityMode.NO_REDO);
+                    try {
+                        return doFindAndStore(txn, key, value);
+                    } finally {
+                        txn.durabilityMode(dmode);
+                    }
+                }
             }
         } catch (Throwable e) {
-            throw handleException(e, true);
+            throw handleException(e, false); // no reset on safe exception
         }
     }
 
@@ -2928,35 +3021,62 @@ class _TreeCursor implements CauseCloseable, Cursor {
         }
 
         store(txn, leaf, value);
-        reset();
 
         return oldValue;
     }
 
-    static final byte[] MODIFY_INSERT = new byte[0], MODIFY_REPLACE = new byte[0];
+    static final byte[]
+        MODIFY_INSERT = new byte[0], MODIFY_REPLACE = new byte[0], MODIFY_UPDATE = new byte[0];
 
     /**
-     * Atomic find and modify operation. Cursor must be in a reset state when called, and
-     * cursor is also reset as a side-effect.
+     * Atomic modify operation. If a key is passed in to be found, cursor must already be in a
+     * reset state when this method is called, and the caller must reset the cursor afterwards.
      *
-     * @param key must not be null
-     * @param oldValue MODIFY_INSERT, MODIFY_REPLACE, else update mode
+     * @param key null to use existing key
+     * @param oldValue MODIFY_INSERT, MODIFY_REPLACE, MODIFY_UPDATE, else actual old value
      */
     final boolean findAndModify(byte[] key, byte[] oldValue, byte[] newValue) throws IOException {
-        final _LocalTransaction txn = mTxn;
+        _LocalTransaction txn = mTxn;
 
         try {
             // Note: Acquire exclusive lock instead of performing upgrade sequence. The upgrade
             // would need to be performed with the node latch held, which is deadlock prone.
 
-            mKey = key;
-
             if (txn == null) {
-                final int hash = _LockManager.hash(mTree.mId, key);
-                mKeyHash = hash;
+                final int hash;
+                if (key == null) {
+                    key = mKey;
+                    ViewUtils.positionCheck(key);
+                    hash = keyHash();
+                } else {
+                    mKey = key;
+                    mKeyHash = hash = _LockManager.hash(mTree.mId, key);
+                }
+
+                int mode = storeMode();
+                if (mode != 0) {
+                    _LocalDatabase db = mTree.mDatabase;
+                    if (mode == 1) {
+                        // Always undo.
+                        txn = db.newAlwaysRedoTransaction();
+                        try {
+                            txn.lockExclusive(mTree.mId, key, hash);
+                            boolean result = doFindAndModify(txn, key, oldValue, newValue);
+                            txn.commit();
+                            return result;
+                        } catch (Throwable e) {
+                            txn.reset();
+                            throw e;
+                        }
+                    } else {
+                        // Never redo, but still acquire the lock.
+                        txn = _LocalTransaction.BOGUS;
+                    }
+                }
+
                 final _Locker locker = mTree.lockExclusiveLocal(key, hash);
                 try {
-                    return doFindAndModify(null, key, oldValue, newValue);
+                    return doFindAndModify(txn, key, oldValue, newValue);
                 } finally {
                     locker.unlock();
                 }
@@ -2966,12 +3086,25 @@ class _TreeCursor implements CauseCloseable, Cursor {
 
             LockMode mode = txn.lockMode();
             if (mode == LockMode.UNSAFE) {
-                mKeyHash = 0;
+                if (key == null) {
+                    key = mKey;
+                    ViewUtils.positionCheck(key);
+                } else {
+                    mKey = key;
+                    mKeyHash = 0;
+                }
                 // Indicate that no unlock should be performed.
                 result = LockResult.OWNED_EXCLUSIVE;
             } else {
-                final int hash = _LockManager.hash(mTree.mId, key);
-                mKeyHash = hash;
+                final int hash;
+                if (key == null) {
+                    key = mKey;
+                    ViewUtils.positionCheck(key);
+                    hash = keyHash();
+                } else {
+                    mKey = key;
+                    mKeyHash = hash = _LockManager.hash(mTree.mId, key);
+                }
                 result = txn.lockExclusive(mTree.mId, key, hash);
                 if (result == LockResult.ACQUIRED && mode.repeatable != 0) {
                     // Downgrade to upgradable when no modification is made, to
@@ -2981,8 +3114,21 @@ class _TreeCursor implements CauseCloseable, Cursor {
             }
 
             try {
-                if (doFindAndModify(txn, key, oldValue, newValue)) {
-                    return true;
+                final DurabilityMode dmode;
+                if (storeMode() <= 1 || (dmode = txn.durabilityMode()) == DurabilityMode.NO_REDO) {
+                    if (doFindAndModify(txn, key, oldValue, newValue)) {
+                        return true;
+                    }
+                } else {
+                    // Never redo.
+                    txn.durabilityMode(DurabilityMode.NO_REDO);
+                    try {
+                        if (doFindAndModify(txn, key, oldValue, newValue)) {
+                            return true;
+                        }
+                    } finally {
+                        txn.durabilityMode(dmode);
+                    }
                 }
             } catch (Throwable e) {
                 try {
@@ -3006,16 +3152,26 @@ class _TreeCursor implements CauseCloseable, Cursor {
 
             return false;
         } catch (Throwable e) {
-            throw handleException(e, true);
+            throw handleException(e, false); // no reset on safe exception
         }
     }
 
+    /**
+     * Caller must have acquired the leaf node shared latch, which is always released by this
+     * method.
+     *
+     * @param key non-null to find the key, which should already be locked exclusively
+     */
     private boolean doFindAndModify(_LocalTransaction txn,
                                     byte[] key, byte[] oldValue, byte[] newValue)
         throws IOException
     {
-        // Find with no lock because caller must already acquire exclusive lock.
-        find(null, key, VARIANT_NO_LOCK, new _CursorFrame(), latchRootNode());
+        if (key == null) {
+            leaf().acquireShared();
+        } else {
+            // Find with no lock because caller must already acquire exclusive lock.
+            find(null, key, VARIANT_NO_LOCK, new _CursorFrame(), latchRootNode());
+        }
 
         check: {
             if (oldValue == MODIFY_INSERT) {
@@ -3028,6 +3184,11 @@ class _TreeCursor implements CauseCloseable, Cursor {
                     // Replace allowed.
                     break check;
                 }
+            } else if (oldValue == MODIFY_UPDATE) {
+                if (!Arrays.equals(mValue, newValue)) {
+                    // Update allowed.
+                    break check;
+                }
             } else {
                 if (mValue != null) {
                     if (Arrays.equals(oldValue, mValue)) {
@@ -3037,7 +3198,7 @@ class _TreeCursor implements CauseCloseable, Cursor {
                 } else if (oldValue == null) {
                     if (newValue == null) {
                         // Update allowed, but nothing changed.
-                        resetLatched(mLeaf.mNode);
+                        mLeaf.mNode.releaseShared();
                         return true;
                     } else {
                         // Update allowed.
@@ -3046,7 +3207,7 @@ class _TreeCursor implements CauseCloseable, Cursor {
                 }
             }
 
-            resetLatched(mLeaf.mNode);
+            mLeaf.mNode.releaseShared();
             return false;
         }
 
@@ -3057,7 +3218,6 @@ class _TreeCursor implements CauseCloseable, Cursor {
         }
 
         store(txn, leaf, newValue);
-        reset();
 
         return true;
     }
@@ -4165,6 +4325,8 @@ class _TreeCursor implements CauseCloseable, Cursor {
 
     /**
      * Checks that leaf is defined and returns it.
+     *
+     * @throws UnpositionedCursorException if unpositioned
      */
     private _CursorFrame leaf() {
         _CursorFrame leaf = mLeaf;
@@ -4174,6 +4336,8 @@ class _TreeCursor implements CauseCloseable, Cursor {
 
     /**
      * Latches and returns leaf frame, which might be split.
+     *
+     * @throws UnpositionedCursorException if unpositioned
      */
     protected final _CursorFrame leafExclusive() {
         _CursorFrame leaf = leaf();
