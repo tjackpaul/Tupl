@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -22,10 +23,12 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.InputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.io.Serializable;
 
 import java.lang.reflect.Method;
 
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.TreeMap;
@@ -78,6 +81,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
     int mMaxReplicaThreads;
     transient Crypto mCrypto;
     transient TransactionHandler mTxnHandler;
+    Map<String, ? extends Object> mDebugOpen;
 
     // Fields are set as a side-effect of constructing a replicated Database.
     transient long mReplRecoveryStartNanos;
@@ -208,8 +212,8 @@ public class DatabaseConfig implements Cloneable, Serializable {
     /**
      * Set the size of the secondary off-heap cache, which is empty by default. A secondary
      * cache is slower than a primary cache, but a very large primary cache can cause high
-     * garbage collection overhead. The -XX:MaxDirectMemorySize Java option might be required
-     * when specifying a secondary cache.
+     * garbage collection overhead. The {@code -XX:MaxDirectMemorySize} Java option might be
+     * required when specifying a secondary cache.
      *
      * @param size secondary cache size, in bytes
      */
@@ -402,6 +406,42 @@ public class DatabaseConfig implements Cloneable, Serializable {
         return mTxnHandler;
     }
 
+    /**
+     * Opens the database in read-only mode for debugging purposes, and then closes it. The
+     * format of the printed messages and the supported properties are subject to change.
+     *
+     * <ul>
+     * <li>traceUndo=true to print all recovered undo log messages
+     * <li>traceRedo=true to print all recovered redo log messages
+     * </ul>
+     *
+     * @param out pass null to print to standard out
+     * @param properties optional
+     */
+    public void debugOpen(PrintStream out, Map<String, ? extends Object> properties)
+        throws IOException
+    {
+        if (out == null) {
+            out = System.out;
+        }
+
+        if (properties == null) {
+            properties = Collections.emptyMap();
+        }
+
+        DatabaseConfig config = clone();
+
+        config.eventListener(new EventPrinter(out));
+        config.mReadOnly = true;
+        config.mDebugOpen = properties;
+
+        if (config.mDirectPageAccess == null) {
+            config.directPageAccess(false);
+        }
+
+        Database.open(config).close();
+    }
+
     @Override
     public DatabaseConfig clone() {
         try {
@@ -479,6 +519,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
 
     EnumSet<OpenOption> createOpenOptions() {
         EnumSet<OpenOption> options = EnumSet.noneOf(OpenOption.class);
+        options.add(OpenOption.RANDOM_ACCESS);
         if (mReadOnly) {
             options.add(OpenOption.READ_ONLY);
         }
@@ -488,7 +529,9 @@ public class DatabaseConfig implements Cloneable, Serializable {
         if (mMapDataFiles) {
             options.add(OpenOption.MAPPED);
         }
-        options.add(OpenOption.CREATE);
+        if (mMkdirs) {
+            options.add(OpenOption.CREATE);
+        }
         return options;
     }
 
@@ -570,7 +613,72 @@ public class DatabaseConfig implements Cloneable, Serializable {
         return file.getAbsoluteFile();
     }
 
-    Class<?> directOpenClass() throws IOException {
+    final Database open(boolean destroy, InputStream restore) throws IOException {
+        if (!destroy && restore == null && mReplManager != null) shouldRestore: {
+            // If no data files exist, attempt to restore from a peer.
+
+            File[] dataFiles = dataFiles();
+            if (dataFiles == null) {
+                // No data files are expected.
+                break shouldRestore;
+            }
+
+            for (File file : dataFiles) if (file.exists()) {
+                // Don't restore if any data files are found to exist.
+                break shouldRestore;
+            }
+
+            // ReplicationManager returns null if no restore should be performed.
+            restore = mReplManager.restoreRequest();
+        }
+
+        Method m;
+        Object[] args;
+        if (restore != null) {
+            args = new Object[] {this, restore};
+            m = directRestoreMethod();
+        } else {
+            args = new Object[] {this};
+            if (destroy) {
+                m = directDestroyMethod();
+            } else {
+                m = directOpenMethod();
+            }
+        }
+
+        Throwable e1 = null;
+        if (m != null) {
+            try {
+                return (Database) m.invoke(null, args);
+            } catch (Exception e) {
+                handleDirectException(e);
+                e1 = e;
+            }
+        }
+
+        try {
+            if (restore != null) {
+                return LocalDatabase.restoreFromSnapshot(this, restore);
+            } else if (destroy) {
+                return LocalDatabase.destroy(this);
+            } else {
+                return LocalDatabase.open(this);
+            }
+        } catch (Throwable e2) {
+            e1 = Utils.rootCause(e1);
+            e2 = Utils.rootCause(e2);
+            if (e1 == null || (e2 instanceof Error && !(e1 instanceof Error))) {
+                // Throw the second, considering it to be more severe.
+                Utils.suppress(e2, e1);
+                throw Utils.rethrow(e2);
+            } else {
+                Utils.suppress(e1, e2);
+                throw Utils.rethrow(e1);
+            }
+        }
+    }
+
+    private Class<?> directOpenClass() throws IOException {
         if (mDirectPageAccess == Boolean.FALSE) {
             return null;
         }
@@ -582,7 +690,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
         }
     }
 
-    Method directOpenMethod() throws IOException {
+    private Method directOpenMethod() throws IOException {
         if (mDirectPageAccess == Boolean.FALSE) {
             return null;
         }
@@ -593,7 +701,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
         return m;
     }
 
-    Method directDestroyMethod() throws IOException {
+    private Method directDestroyMethod() throws IOException {
         if (mDirectPageAccess == Boolean.FALSE) {
             return null;
         }
@@ -604,7 +712,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
         return m;
     }
 
-    Method directRestoreMethod() throws IOException {
+    private Method directRestoreMethod() throws IOException {
         if (mDirectPageAccess == Boolean.FALSE) {
             return null;
         }
@@ -616,7 +724,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
         return m;
     }
 
-    void handleDirectException(Exception e) throws IOException {
+    private void handleDirectException(Exception e) throws IOException {
         if (e instanceof RuntimeException || e instanceof IOException) {
             throw rethrow(e);
         }
@@ -624,7 +732,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
         if (cause == null) {
             cause = e;
         }
-        if (cause instanceof RuntimeException || e instanceof IOException) {
+        if (cause instanceof RuntimeException || cause instanceof IOException) {
             throw rethrow(cause);
         }
         if (mDirectPageAccess == Boolean.TRUE) {

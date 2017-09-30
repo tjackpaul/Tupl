@@ -1,30 +1,34 @@
 /*
- *  Copyright 2012-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl.ext;
 
 import java.io.Closeable;
+import java.io.InputStream;
 import java.io.IOException;
 
 import org.cojen.tupl.ConfirmationFailureException;
+import org.cojen.tupl.Database;
 import org.cojen.tupl.DatabaseConfig;
 import org.cojen.tupl.DurabilityMode;
 import org.cojen.tupl.EventListener;
 import org.cojen.tupl.Index;
 import org.cojen.tupl.LockMode;
+import org.cojen.tupl.UnmodifiableReplicaException;
 
 /**
  * Interface which replaces the redo log, for replicating transactional operations.
@@ -41,6 +45,18 @@ public interface ReplicationManager extends Closeable {
      * other implementations.
      */
     long encoding();
+
+    /**
+     * Called when the database is created, in an attempt to retrieve an existing database
+     * snapshot from a replication peer. If null is returned, the database will try to start
+     * reading replication data at the lowest position.
+     *
+     * @return null if no snapshot could be found
+     * @throws IOException if a snapshot was found, but requesting it failed
+     */
+    default InputStream restoreRequest() throws IOException {
+        return null;
+    }
 
     /**
      * Start the replication manager in replica mode. Invocation of this method implies that
@@ -60,11 +76,29 @@ public interface ReplicationManager extends Closeable {
     /**
      * Called after replication threads have started, providing an opportunity to wait until
      * replication has sufficiently "caught up". The thread which is opening the database
-     * invokes this method, and so it blocks until recovery completes.
+     * invokes this method, and so it blocks until recovery completes. Default implementation
+     * does nothing.
      *
-     * @param listener optional listener for posting recovery events to
+     * @param accessor provides access to the database
      */
-    void recover(EventListener listener) throws IOException;
+    default void ready(Accessor accessor) throws IOException {}
+
+    static interface Accessor extends EventListener {
+        /**
+         * Access the database which is being replicated.
+         */
+        Database database();
+
+        /**
+         * Attempt to write a replicated control message, and then calls {@link
+         * ReplicationManager#control control} when confirmed. Control messages might get
+         * replayed, and so they must be idempotent.
+         *
+         * @return confirmed log position just after the message
+         * @throws UnmodifiableReplicaException if not the leader
+         */
+        long control(byte[] message) throws IOException;
+    }
 
     /**
      * Returns the next position a replica will read from, which must be confirmed. Position is
@@ -74,20 +108,12 @@ public interface ReplicationManager extends Closeable {
 
     /**
      * Blocks at most once, reading as much replication input as possible. Returns -1 if local
-     * instance has become the leader.
+     * instance has become the leader, and a writer instance now exists.
      *
      * @return amount read, or -1 if leader
      * @throws IllegalStateException if not started
      */
     int read(byte[] b, int off, int len) throws IOException;
-
-    /**
-     * Called to acknowledge mode change from replica to leader, or vice versa. Until flip is
-     * called, all read and write operations fail as if the leadership mode is indeterminate.
-     * Reads fail as if the local instance is the leader, and writes fail as if the local
-     * instance is a replica.
-     */
-    void flip();
 
     /**
      * Returns an object which allows the leader to write changes. A new instance is required
@@ -115,41 +141,61 @@ public interface ReplicationManager extends Closeable {
          * local instance loses leadership, all data rolls back to the highest confirmed
          * position.
          *
-         * @return potential confirmation position, or -1 if not leader
-         */
-        long write(byte[] b, int off, int len) throws IOException;
-
-        /**
-         * Same as the regular write method, except that the message contains a transaction
-         * commit operation. This variant exists to allow an implementation to capture the
-         * confirmation position of a transaction, in a thread-local variable.
+         * <p>An optional commit parameter defines the highest log position which immediately
+         * follows a transaction commit operation. If leadership is lost, the message stream is
+         * guaranteed to be truncated at a position no higher than the highest commit position
+         * ever provided. The given commit position is ignored if it's higher than what has
+         * actually been written.
          *
-         * @return potential confirmation position, or -1 if not leader
+         * @param b message buffer
+         * @param off message buffer offset
+         * @param len message length
+         * @param commitPos highest transaction commit position; pass 0 if nothing changed
+         * @return false if not leader
+         * @throws IllegalArgumentException if commitPos is negative
          */
-        default long writeCommit(byte[] b, int off, int len) throws IOException {
-            return write(b, off, len);
-        }
+        boolean write(byte[] b, int off, int len, long commitPos) throws IOException;
 
         /**
          * Blocks until all data up to the given log position is confirmed.
          *
-         * @param position confirmation position as provided by the write method
-         * @return false if not leader
+         * @param commitPos commit position which was passed to the write method
+         * @return false if not leader at the given position
          * @throws ConfirmationFailureException
          */
-        default boolean confirm(long position) throws IOException {
-            return confirm(position, -1);
+        default boolean confirm(long commitPos) throws IOException {
+            return confirm(commitPos, -1);
         }
 
         /**
          * Blocks until all data up to the given log position is confirmed.
          *
-         * @param position confirmation position as provided by the write method
+         * @param commitPos commit position which was passed to the write method
          * @param timeoutNanos pass -1 for infinite
-         * @return false if not leader
+         * @return false if not leader at the given position
          * @throws ConfirmationFailureException
          */
-        boolean confirm(long position, long timeoutNanos) throws IOException;
+        boolean confirm(long commitPos, long timeoutNanos) throws IOException;
+
+        /**
+         * Blocks until the leadership end is confirmed. This method must be called before
+         * switching to replica mode.
+         *
+         * @return the end commit position; same as next read position
+         * @throws ConfirmationFailureException if end position cannot be determined
+         */
+        default long confirmEnd() throws ConfirmationFailureException {
+            return confirmEnd(-1);
+        }
+
+        /**
+         * Blocks until the leadership end is confirmed. This method must be called before
+         * switching to replica mode.
+         *
+         * @return the end commit position; same as next read position
+         * @throws ConfirmationFailureException if end position cannot be determined
+         */
+        long confirmEnd(long timeoutNanos) throws ConfirmationFailureException;
     }
 
     /**
@@ -186,17 +232,13 @@ public interface ReplicationManager extends Closeable {
     void checkpointed(long position) throws IOException;
 
     /**
-     * Notification to replica when an entry is stored into an index. All notifications are
-     * {@link LockMode#READ_UNCOMMITTED uncommitted}, and so loading with an appropriate lock
-     * mode is required for confirmation. The current thread is free to perform any blocking
-     * operations &mdash; it will not suspend replication processing unless {@link
-     * DatabaseConfig#maxReplicaThreads all} replication threads are consumed.
+     * Called after a control operation has been confirmed by a leader or received by a
+     * replica. All replication processing and checkpoints are suspended until this method
+     * returns. Any exception thrown by this method causes the database to panic and close.
      *
-     * @param index non-null index reference
-     * @param key non-null key; contents must not be modified
-     * @param value null if entry is deleted; contents can be modified
+     * @param position log position just after the message
      */
-    default void notifyStore(Index index, byte[] key, byte[] value) {}
+    default void control(long position, byte[] message) throws IOException {}
 
     /**
      * Notification to replica after an index is renamed. The current thread is free to perform

@@ -1,17 +1,18 @@
 /*
- *  Copyright 2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl.io;
@@ -31,8 +32,6 @@ import com.sun.jna.Native;
 import com.sun.jna.Platform;
 import com.sun.jna.Pointer;
 import com.sun.jna.Structure;
-
-import org.cojen.tupl.util.Latch;
 
 /**
  * 
@@ -56,8 +55,9 @@ final class PosixFileIO extends AbstractFileIO {
     private final File mFile;
     private final int mReopenOptions;
 
-    private final Latch mAccessLatch;
     private final ThreadLocal<BufRef> mBufRef;
+    private final boolean mReadahead;
+    private final boolean mCloseDontNeed;
 
     private int mFileDescriptor;
 
@@ -74,14 +74,14 @@ final class PosixFileIO extends AbstractFileIO {
                 new JavaFileIO(file, options, 1, false).close();
             }
         }
+        mReadahead = options.contains(OpenOption.READAHEAD);
+        mCloseDontNeed = options.contains(OpenOption.CLOSE_DONTNEED);
 
-        mAccessLatch = new Latch();
-
-        mAccessLatch.acquireExclusive();
+        mAccessLock.acquireExclusive();
         try {
             mFileDescriptor = openFd(file, options);
         } finally {
-            mAccessLatch.releaseExclusive();
+            mAccessLock.releaseExclusive();
         }
 
         mBufRef = new ThreadLocal<>();
@@ -97,22 +97,12 @@ final class PosixFileIO extends AbstractFileIO {
 
     @Override
     protected long doLength() throws IOException {
-        mAccessLatch.acquireShared();
-        try {
-            return lseekEndFd(fd(), 0);
-        } finally {
-            mAccessLatch.releaseShared();
-        }
+        return lseekEndFd(fd(), 0);
     }
 
     @Override
     protected void doSetLength(long length) throws IOException {
-        mAccessLatch.acquireShared();
-        try {
-            ftruncateFd(fd(), length);
-        } finally {
-            mAccessLatch.releaseShared();
-        }
+        ftruncateFd(fd(), length);
     }
 
     @Override
@@ -138,12 +128,7 @@ final class PosixFileIO extends AbstractFileIO {
 
     @Override
     protected void doRead(long pos, long ptr, int length) throws IOException {
-        mAccessLatch.acquireShared();
-        try {
-            preadFd(fd(), ptr, length, pos);
-        } finally {
-            mAccessLatch.releaseShared();
-        }
+        preadFd(fd(), ptr, length, pos);
     }
 
     @Override
@@ -169,67 +154,51 @@ final class PosixFileIO extends AbstractFileIO {
 
     @Override
     protected void doWrite(long pos, long ptr, int length) throws IOException {
-        mAccessLatch.acquireShared();
-        try {
-            pwriteFd(fd(), ptr, length, pos);
-        } finally {
-            mAccessLatch.releaseShared();
-        }
+        pwriteFd(fd(), ptr, length, pos);
     }
 
     @Override
     protected Mapping openMapping(boolean readOnly, long pos, int size) throws IOException {
+        if (mReadahead) {
+            // Apply readahead only when this file is mapped to prevent unnecessary memory churn.
+            fadvise(mFileDescriptor, pos, size, 3); // 3 = POSIX_FADV_WILLNEED
+        }
         return new PosixMapping(mFileDescriptor, readOnly, pos, size);
     }
 
     @Override
     protected void reopen() throws IOException {
-        mAccessLatch.acquireShared();
-        try {
-            closeFd(fd());
+        closeFd(fd());
 
-            EnumSet<OpenOption> options = EnumSet.noneOf(OpenOption.class);
-            if (isReadOnly()) {
-                options.add(OpenOption.READ_ONLY);
-            }
-            if ((mReopenOptions & REOPEN_SYNC_IO) != 0) {
-                options.add(OpenOption.SYNC_IO);
-            }
-            if ((mReopenOptions & REOPEN_NON_DURABLE) != 0) {
-                options.add(OpenOption.NON_DURABLE);
-            }
-
-            mFileDescriptor = openFd(mFile, options);
-        } finally {
-            mAccessLatch.releaseShared();
+        EnumSet<OpenOption> options = EnumSet.noneOf(OpenOption.class);
+        if (isReadOnly()) {
+            options.add(OpenOption.READ_ONLY);
         }
+        if ((mReopenOptions & REOPEN_SYNC_IO) != 0) {
+            options.add(OpenOption.SYNC_IO);
+        }
+        if ((mReopenOptions & REOPEN_NON_DURABLE) != 0) {
+            options.add(OpenOption.NON_DURABLE);
+        }
+
+        mFileDescriptor = openFd(mFile, options);
     }
 
     @Override
     protected void doSync(boolean metadata) throws IOException {
-        mAccessLatch.acquireShared();
-        try {
-            int fd = fd();
-            if (metadata) {
-                fsyncFd(fd);
-            } else {
-                fdatasyncFd(fd);
-            }
-        } finally {
-            mAccessLatch.releaseShared();
+        int fd = fd();
+        if (metadata) {
+            fsyncFd(fd);
+        } else {
+            fdatasyncFd(fd);
         }
-    }
-
-    @Override
-    public void close() throws IOException {
-        close(null);
     }
 
     @Override
     public void close(Throwable cause) throws IOException {
         int fd;
 
-        mAccessLatch.acquireExclusive();
+        mAccessLock.acquireExclusive();
         try {
             fd = mFileDescriptor;
             if (fd == 0) {
@@ -238,7 +207,7 @@ final class PosixFileIO extends AbstractFileIO {
             mCause = cause;
             mFileDescriptor = 0;
         } finally {
-            mAccessLatch.releaseExclusive();
+            mAccessLock.releaseExclusive();
         }
 
         IOException ex = null;
@@ -248,12 +217,20 @@ final class PosixFileIO extends AbstractFileIO {
             ex = e;
         }
 
+        if (mCloseDontNeed) {
+            // Hint to the kernel that it can release pages associated with this
+            // file. It is free to ignore our advice, but generally helps
+            // prevent filling up the page cache with useless data. On numa
+            // machines page cache pollution can cause unnecesary trashing.
+            
+            // Using length of 0 means to apply the hint from the offset to EOF.
+            fadvise(fd, 0, 0, 4); // 4 = POSIX_FADV_DONTNEED
+        }
+
         try {
             closeFd(fd);
         } catch (IOException e) {
-            if (ex != null) {
-                e.addSuppressed(ex);
-            }
+            Utils.suppress(e, ex);
             throw e;
         }
     }
@@ -267,7 +244,7 @@ final class PosixFileIO extends AbstractFileIO {
         return ref;
     }
 
-    // Caller must hold mAccessLatch.
+    // Caller must hold mAccessLock.
     private int fd() throws IOException {
         int fd = mFileDescriptor;
         if (fd == 0) {
@@ -308,6 +285,19 @@ final class PosixFileIO extends AbstractFileIO {
 
         if (fd == -1) {
             throw lastErrorToException();
+        }
+
+        if (options.contains(OpenOption.RANDOM_ACCESS)) {
+            try {
+                fadvise(fd, 0, 0, 1); // 1 = POSIX_FADV_RANDOM
+            } catch (Throwable e) {
+                try {
+                    closeFd(fd);
+                } catch (IOException e2) {
+                    Utils.suppress(e, e2);
+                }
+                throw e;
+            }
         }
 
         return fd;
@@ -399,6 +389,13 @@ final class PosixFileIO extends AbstractFileIO {
         }
     }
 
+    static void fadvise(int fd, long offset, long length, int advice) throws IOException {
+        int result = platform().fadvise(fd, offset, length, advice);
+        if (result != 0) {
+            throw new IOException(errorMessage(result));
+        }
+    }
+
     static void closeFd(int fd) throws IOException {
         if (close(fd) == -1) {
             throw lastErrorToException();
@@ -458,10 +455,17 @@ final class PosixFileIO extends AbstractFileIO {
     }
 
     @Override
-    protected void preallocate(long pos, long length) throws IOException {
-        if (FallocateHolder.INSTANCE == null) {
+    protected boolean shouldPreallocate(LengthOption option) {
+        return option == LengthOption.PREALLOCATE_ALWAYS
+            || (option == LengthOption.PREALLOCATE_OPTIONAL && platform() != NullIO.INSTANCE);
+    }
+
+    @Override
+    protected void doPreallocate(long pos, long length) throws IOException {
+        PlatformIO platform = platform();
+        if (platform == NullIO.INSTANCE) {
             // Don't have fallocate (or equivalent). Use default non-destructive zero-fill behavior.
-            super.preallocate(pos, length);
+            super.doPreallocate(pos, length);
             return;
         } 
 
@@ -473,18 +477,36 @@ final class PosixFileIO extends AbstractFileIO {
         // compared to 27 milliseconds to zero-fill that same amount.
         //
         // On OSX, uses fcntl with command F_PREALLOCATE.
-        int result = FallocateHolder.INSTANCE.fallocate(fd(), pos, length);
+        int result = platform.fallocate(fd(), pos, length);
         if (result != 0) {
             // Note: the native call above does not set errno.
             throw new IOException(errorMessage(result));
         }
     }
 
-    private static abstract class Fallocate {
+    /** Platform specific helper. */
+    private static abstract class PlatformIO {
         public abstract int fallocate(int fd, long pos, long length);
+        public abstract int fadvise(int fd, long offset, long length, int advice);
     }
 
-    private static class DefaultFallocate extends Fallocate {
+    /** No-op helper. */
+    private static class NullIO extends PlatformIO {
+        static final NullIO INSTANCE = new NullIO();
+
+        @Override
+        public int fallocate(int fd, long pos, long length) {
+            return 0;
+        }
+
+        @Override
+        public int fadvise(int fd, long offset, long length, int advice) {
+            return 0;
+        }
+    }
+
+    /** Default POSIX I/O calls. */
+    private static class DefaultIO extends PlatformIO {
         static {
             Native.register(Platform.C_LIBRARY_NAME);
         }
@@ -494,18 +516,29 @@ final class PosixFileIO extends AbstractFileIO {
             return posix_fallocate(fd, pos, length);
         }
 
+        @Override
+        public int fadvise(int fd, long offset, long length, int advice) {
+            return posix_fadvise(fd, offset, length, advice);
+        }
+
         static native int posix_fallocate(int fd, long offset, long len);
+
+        static native int posix_fadvise(int fd, long offset, long length, int advice);
     }
 
     /** 
-     * Uses fcntl with the F_PREALLOCATE command to force block allocation on OSX.
-     * On a Core i5 MacBook Pro w/SSD it takes on average 1.5ms to preallocate
-     * a 64MB file.
+     * Mac OSX specific I/O calls.
+     *
+     * For fallocate uses fcntl with the F_PREALLOCATE command to force block
+     * allocation on OSX.  On a Core i5 MacBook Pro w/SSD it takes on average
+     * 1.5ms to preallocate a 64MB file.
      *
      * Direct maps fcntl again with an explicit fstore_t parameter to avoid the more complex
      * and slow method of using jna varags through library mapping.
+     *
+     * The fadvise call is a no-op.
      */
-    private static class MacFallocate extends Fallocate {
+    private static class MacIO extends PlatformIO {
         @SuppressWarnings("unused")
         public static class Fstore extends Structure {
             public static class ByReference extends Fstore implements Structure.ByReference { }
@@ -547,6 +580,12 @@ final class PosixFileIO extends AbstractFileIO {
             return 0;
         }
 
+        @Override
+        public int fadvise(int fd, long offset, long length, int advice) {
+            // Unsupported on OSX. 
+            return 0;
+        }
+
         static {
             Native.register(Platform.C_LIBRARY_NAME);
         }
@@ -555,22 +594,26 @@ final class PosixFileIO extends AbstractFileIO {
     }
 
 
-    /** Account for posix_fallocate not being available on OSX. */
-    public static class FallocateHolder {
-        public static final Fallocate INSTANCE;
+    /** Accounts for OSX not supporting some I/O operations. */
+    public static class PlatformHolder {
+        public static final PlatformIO INSTANCE;
         static {
-            Fallocate inst = null;
+            PlatformIO inst = null;
             if (Platform.isMac()) {
-                inst = new MacFallocate();
+                inst = new MacIO();
             } else {
                 try {
-                    inst = new DefaultFallocate();
+                    inst = new DefaultIO();
                 } catch (UnsatisfiedLinkError e) {
-                    // ignore
+                    inst = NullIO.INSTANCE;
                 }
             }
             INSTANCE = inst;
         }
+    }
+
+    private static PlatformIO platform() {
+        return PlatformHolder.INSTANCE;
     }
 
     static native long strerror_r(int errnum, long bufPtr, int buflen);

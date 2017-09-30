@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -20,6 +21,12 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.InterruptedIOException;
 import java.io.IOException;
+
+import java.util.Comparator;
+
+import java.nio.charset.StandardCharsets;
+
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.cojen.tupl.DirectPageOps.*;
 import static org.cojen.tupl.Utils.*;
@@ -88,6 +95,11 @@ class _Tree implements View, Index {
     }
 
     @Override
+    public Comparator<byte[]> getComparator() {
+        return KeyComparator.THE;
+    }
+
+    @Override
     public final long getId() {
         return mId;
     }
@@ -103,11 +115,7 @@ class _Tree implements View, Index {
         if (name == null) {
             return null;
         }
-        try {
-            return new String(name, "UTF-8");
-        } catch (IOException e) {
-            return new String(name);
-        }
+        return new String(name, StandardCharsets.UTF_8);
     }
 
     @Override
@@ -116,12 +124,17 @@ class _Tree implements View, Index {
     }
 
     @Override
+    public Transaction newTransaction(DurabilityMode durabilityMode) {
+        return mDatabase.newTransaction(durabilityMode);
+    }
+
+    @Override
     public long count(byte[] lowKey, byte[] highKey) throws IOException {
-        _TreeCursor cursor = new _TreeCursor(this, Transaction.BOGUS);
+        _TreeCursor cursor = newCursor(Transaction.BOGUS);
         _TreeCursor high = null;
         try {
             if (highKey != null) {
-                high = new _TreeCursor(this, Transaction.BOGUS);
+                high = newCursor(Transaction.BOGUS);
                 high.autoload(false);
                 high.find(highKey);
                 if (high.mKey == null) {
@@ -158,6 +171,8 @@ class _Tree implements View, Index {
         // before releasing the root latch. Also, _Node.used is not invoked for the root node,
         // because it cannot be evicted.
 
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
         while (!node.isLeaf()) {
             int childPos;
             try {
@@ -168,26 +183,15 @@ class _Tree implements View, Index {
             }
 
             long childId = node.retrieveChildRefId(childPos);
-            _Node childNode = mDatabase.nodeMapGet(childId);
+            _Node childNode = mDatabase.nodeMapGetShared(childId);
 
             if (childNode != null) {
-                childNode.acquireShared();
-
-                // Need to check again in case evict snuck in.
-                if (childId == childNode.mId) {
-                    node.releaseShared();
-                    node = childNode;
-                    if (node.mSplit != null) {
-                        node = node.mSplit.selectNode(node, key);
-                    }
-                    node.used();
-                    continue;
-                }
-
-                childNode.releaseShared();
+                node.releaseShared();
+                node = childNode;
+                node.used(rnd);
+            } else {
+                node = node.loadChild(mDatabase, childId, _Node.OPTION_PARENT_RELEASE_SHARED);
             }
-
-            node = node.loadChild(mDatabase, childId, _Node.OPTION_PARENT_RELEASE_SHARED);
 
             if (node.mSplit != null) {
                 node = node.mSplit.selectNode(node, key);
@@ -356,41 +360,209 @@ class _Tree implements View, Index {
     }
 
     @Override
-    public void store(Transaction txn, byte[] key, byte[] value) throws IOException {
-        keyCheck(key);
-        _TreeCursor cursor = new _TreeCursor(this, txn);
-        cursor.autoload(false);
-        cursor.findAndStore(key, value);
+    public final boolean exists(Transaction txn, byte[] key) throws IOException {
+        _LocalTransaction local = check(txn);
+
+        // If lock must be acquired and retained, acquire now and skip the quick check later.
+        if (local != null) {
+            int lockType = local.lockMode().repeatable;
+            if (lockType != 0) {
+                int hash = _LockManager.hash(mId, key);
+                local.lock(lockType, mId, key, hash, local.mLockTimeoutNanos);
+            }
+        }
+
+        _Node node = mRoot;
+        node.acquireShared();
+
+        // Note: No need to check if root has split, since root splits are always completed
+        // before releasing the root latch. Also, _Node.used is not invoked for the root node,
+        // because it cannot be evicted.
+
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+        while (!node.isLeaf()) {
+            int childPos;
+            try {
+                childPos = _Node.internalPos(node.binarySearch(key));
+            } catch (Throwable e) {
+                node.releaseShared();
+                throw e;
+            }
+
+            long childId = node.retrieveChildRefId(childPos);
+            _Node childNode = mDatabase.nodeMapGetShared(childId);
+
+            if (childNode != null) {
+                node.releaseShared();
+                node = childNode;
+                node.used(rnd);
+            } else {
+                node = node.loadChild(mDatabase, childId, _Node.OPTION_PARENT_RELEASE_SHARED);
+            }
+
+            if (node.mSplit != null) {
+                node = node.mSplit.selectNode(node, key);
+            }
+        }
+
+        // Sub search into leaf with shared latch held.
+
+        _CursorFrame frame;
+        int keyHash;
+
+        try {
+            int pos = node.binarySearch(key);
+
+            if ((local != null && local.lockMode() != LockMode.READ_COMMITTED) ||
+                mLockManager.isAvailable(local, mId, key, keyHash = _LockManager.hash(mId, key)))
+            {
+                return pos >= 0 && node.hasLeafValue(pos) != null;
+            }
+
+            // Need to acquire the lock before loading. To prevent deadlock, a cursor
+            // frame must be bound and then the node latch can be released.
+            frame = new _CursorFrame();
+
+            if (pos >= 0) {
+                if (node.mSplit != null) {
+                    pos = node.mSplit.adjustBindPosition(pos);
+                }
+            } else {
+                frame.mNotFoundKey = key;
+                if (node.mSplit != null) {
+                    pos = ~node.mSplit.adjustBindPosition(~pos);
+                }
+            }
+
+            frame.bind(node, pos);
+        } finally {
+            node.releaseShared();
+        }
+
+        try {
+            _Locker locker;
+            if (local == null) {
+                locker = lockSharedLocal(key, keyHash);
+            } else if (local.lockShared(mId, key, keyHash) == LockResult.ACQUIRED) {
+                locker = local;
+            } else {
+                // Transaction already had the lock for some reason, so don't release it.
+                locker = null;
+            }
+
+            try {
+                node = frame.acquireShared();
+                int pos = frame.mNodePos;
+                boolean result = pos >= 0 && node.hasLeafValue(pos) != null;
+                node.releaseShared();
+                return result;
+            } finally {
+                if (locker != null) {
+                    locker.unlock();
+                }
+            }
+        } finally {
+            _CursorFrame.popAll(frame);
+        }
     }
 
     @Override
-    public byte[] exchange(Transaction txn, byte[] key, byte[] value) throws IOException {
+    public final void store(Transaction txn, byte[] key, byte[] value) throws IOException {
         keyCheck(key);
-        return new _TreeCursor(this, txn).findAndStore(key, value);
+        _TreeCursor cursor = newCursor(txn);
+        try {
+            cursor.autoload(false);
+            cursor.findAndStore(key, value);
+        } finally {
+            cursor.reset();
+        }
     }
 
     @Override
-    public boolean insert(Transaction txn, byte[] key, byte[] value) throws IOException {
+    public final byte[] exchange(Transaction txn, byte[] key, byte[] value) throws IOException {
         keyCheck(key);
-        _TreeCursor cursor = new _TreeCursor(this, txn);
-        cursor.autoload(false);
-        return cursor.findAndModify(key, _TreeCursor.MODIFY_INSERT, value);
+        _TreeCursor cursor = newCursor(txn);
+        try {
+            return cursor.findAndStore(key, value);
+        } finally {
+            cursor.reset();
+        }
     }
 
     @Override
-    public boolean replace(Transaction txn, byte[] key, byte[] value) throws IOException {
+    public final boolean insert(Transaction txn, byte[] key, byte[] value) throws IOException {
         keyCheck(key);
-        _TreeCursor cursor = new _TreeCursor(this, txn);
-        cursor.autoload(false);
-        return cursor.findAndModify(key, _TreeCursor.MODIFY_REPLACE, value);
+        _TreeCursor cursor = newCursor(txn);
+        try {
+            cursor.autoload(false);
+            return cursor.findAndModify(key, _TreeCursor.MODIFY_INSERT, value);
+        } finally {
+            cursor.reset();
+        }
     }
 
     @Override
-    public boolean update(Transaction txn, byte[] key, byte[] oldValue, byte[] newValue)
+    public final boolean replace(Transaction txn, byte[] key, byte[] value) throws IOException {
+        keyCheck(key);
+        _TreeCursor cursor = newCursor(txn);
+        try {
+            cursor.autoload(false);
+            return cursor.findAndModify(key, _TreeCursor.MODIFY_REPLACE, value);
+        } finally {
+            cursor.reset();
+        }
+    }
+
+    @Override
+    public final boolean update(Transaction txn, byte[] key, byte[] value) throws IOException {
+        keyCheck(key);
+        _TreeCursor cursor = newCursor(txn);
+        try {
+            // TODO: Optimize by disabling autoload and do an in-place comparison.
+            return cursor.findAndModify(key, _TreeCursor.MODIFY_UPDATE, value);
+        } finally {
+            cursor.reset();
+        }
+    }
+
+    @Override
+    public final boolean update(Transaction txn, byte[] key, byte[] oldValue, byte[] newValue)
         throws IOException
     {
         keyCheck(key);
-        return new _TreeCursor(this, txn).findAndModify(key, oldValue, newValue);
+        _TreeCursor cursor = newCursor(txn);
+        try {
+            return cursor.findAndModify(key, oldValue, newValue);
+        } finally {
+            cursor.reset();
+        }
+    }
+
+    @Override
+    public LockResult touch(Transaction txn, byte[] key) throws LockFailureException {
+        _LocalTransaction local = check(txn);
+
+        LockMode mode;
+        if (local == null || (mode = local.lockMode()) == LockMode.READ_COMMITTED) {
+            int hash = _LockManager.hash(mId, key);
+            if (!isLockAvailable(local, key, hash)) {
+                // Acquire and release.
+                if (local == null) {
+                    lockSharedLocal(key, hash).unlock();
+                } else {
+                    LockResult result = local.lock(0, mId, key, hash, local.mLockTimeoutNanos);
+                    if (result == LockResult.ACQUIRED) {
+                        local.unlock();
+                    }
+                }
+            }
+        } else if (!mode.noReadLock) {
+            int hash = _LockManager.hash(mId, key);
+            return local.lock(mode.repeatable, mId, key, hash, local.mLockTimeoutNanos);
+        }
+
+        return LockResult.UNOWNED;
     }
 
     @Override
@@ -441,7 +613,7 @@ class _Tree implements View, Index {
     /*
     @Override
     public Stream newStream() {
-        _TreeCursor cursor = new _TreeCursor(this);
+        _TreeCursor cursor = newCursor();
         cursor.autoload(false);
         return new _TreeValueStream(cursor);
     }
@@ -504,7 +676,7 @@ class _Tree implements View, Index {
         throws IOException
     {
         long length = 0;
-        _TreeCursor cursor = new _TreeCursor(this, txn);
+        _TreeCursor cursor = newCursor(txn);
         cursor.autoload(autoload);
 
         try {
@@ -558,7 +730,7 @@ class _Tree implements View, Index {
 
     @Override
     public Stats analyze(byte[] lowKey, byte[] highKey) throws IOException {
-        _TreeCursor cursor = new _TreeCursor(this, Transaction.BOGUS);
+        _TreeCursor cursor = newCursor(Transaction.BOGUS);
         try {
             cursor.autoload(false);
             cursor.random(lowKey, highKey);
@@ -593,7 +765,7 @@ class _Tree implements View, Index {
             return false;
         }
 
-        _TreeCursor cursor = new _TreeCursor(this, Transaction.BOGUS);
+        _TreeCursor cursor = newCursor(Transaction.BOGUS);
         try {
             cursor.autoload(false);
 
@@ -639,7 +811,7 @@ class _Tree implements View, Index {
      * @return false if should stop
      */
     final boolean verifyTree(Index view, VerificationObserver observer) throws IOException {
-        _TreeCursor cursor = new _TreeCursor(this, Transaction.BOGUS);
+        _TreeCursor cursor = newCursor(Transaction.BOGUS);
         try {
             cursor.autoload(false);
             cursor.first(); // must start with loaded key
@@ -662,7 +834,7 @@ class _Tree implements View, Index {
 
     @Override
     public final void close() throws IOException {
-        close(false, false);
+        close(false, false, false);
     }
 
     /**
@@ -670,6 +842,23 @@ class _Tree implements View, Index {
      * @return root node if forDelete; null if already closed
      */
     final _Node close(boolean forDelete, final boolean rootLatched) throws IOException {
+        return close(forDelete, rootLatched, false);
+    }
+
+    /**
+     * Close any kind of index, even an internal one.
+     */
+    final void forceClose() throws IOException {
+        close(false, false, true);
+    }
+
+    /**
+     * @param rootLatched true if root node is already latched by the current thread
+     * @return root node if forDelete; null if already closed
+     */
+    private _Node close(boolean forDelete, final boolean rootLatched, boolean force)
+        throws IOException
+    {
         _Node root = mRoot;
 
         if (!rootLatched) {
@@ -682,7 +871,7 @@ class _Tree implements View, Index {
                 return null;
             }
 
-            if (isInternal(mId)) {
+            if (!force && isInternal(mId)) {
                 throw new IllegalStateException("Cannot close an internal index");
             }
 
@@ -764,29 +953,44 @@ class _Tree implements View, Index {
      * @return delete task
      */
     final Runnable drop(boolean mustBeEmpty) throws IOException {
-        _Node root = mRoot;
-        root.acquireExclusive();
+        // Acquire early to avoid deadlock when moving tree to trash.
+        CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
+
+        _Node root;
         try {
-            if (root.mPage == p_closedTreePage()) {
-                throw new ClosedIndexException();
+            root = mRoot;
+            root.acquireExclusive();
+        } catch (Throwable e) {
+            shared.release();
+            throw e;
+        }
+
+        try {
+            try {
+                if (root.mPage == p_closedTreePage()) {
+                    throw new ClosedIndexException();
+                }
+
+                if (mustBeEmpty && (!root.isLeaf() || root.hasKeys())) {
+                    // Note that this check also covers the transactional case, because deletes
+                    // store ghosts. The message could be more accurate, but it would require
+                    // scanning the whole index looking for ghosts. Using LockMode.UNSAFE
+                    // deletes it's possible to subvert the transactional case, allowing the
+                    // drop to proceed. The rollback logic in _UndoLog accounts for this,
+                    // ignoring undo operations for missing indexes. Preventing the drop in
+                    // this case isn't worth the trouble, because UNSAFE is what it is.
+                    throw new IllegalStateException("Cannot drop a non-empty index");
+                }
+
+                if (isInternal(mId)) {
+                    throw new IllegalStateException("Cannot close an internal index");
+                }
+            } catch (Throwable e) {
+                shared.release();
+                throw e;
             }
 
-            if (mustBeEmpty && (!root.isLeaf() || root.hasKeys())) {
-                // Note that this check also covers the transactional case, because deletes
-                // store ghosts. The message could be more accurate, but it would require
-                // scanning the whole index looking for ghosts. Using LockMode.UNSAFE deletes
-                // it's possible to subvert the transactional case, allowing the drop to
-                // proceed. The rollback logic in _UndoLog accounts for this, ignoring undo
-                // operations for missing indexes. Preventing the drop in this case isn't worth
-                // the trouble, because UNSAFE is what it is.
-                throw new IllegalStateException("Cannot drop a non-empty index");
-            }
-
-            if (isInternal(mId)) {
-                throw new IllegalStateException("Cannot close an internal index");
-            }
-
-            return mDatabase.deleteTree(this);
+            return mDatabase.deleteTree(this, shared);
         } finally {
             root.releaseExclusive();
         }
@@ -795,9 +999,11 @@ class _Tree implements View, Index {
     /**
      * Non-transactionally deletes all entries in the tree. No other cursors or threads can be
      * active in the tree. The root node is prepared for deletion as a side effect.
+     *
+     * @return false if stopped because database is closed
      */
-    final void deleteAll() throws IOException {
-        new _TreeCursor(this, Transaction.BOGUS).deleteAll();
+    final boolean deleteAll() throws IOException {
+        return newCursor(Transaction.BOGUS).deleteAll();
     }
 
     @FunctionalInterface
@@ -838,20 +1044,14 @@ class _Tree implements View, Index {
                         break toLower;
                     }
                     long childId = node.retrieveChildRefId(pos);
-                    _Node child = mDatabase.nodeMapGet(childId);
+                    _Node child = mDatabase.nodeMapGetExclusive(childId);
                     if (child != null) {
-                        child.acquireExclusive();
-                        // Need to check again in case evict snuck in.
-                        if (childId != child.mId) {
-                            child.releaseExclusive();
-                        } else {
-                            frame = new _CursorFrame(frame);
-                            frame.bind(node, pos);
-                            node.releaseExclusive();
-                            node = child;
-                            pos = 0;
-                            continue toLower;
-                        }
+                        frame = new _CursorFrame(frame);
+                        frame.bind(node, pos);
+                        node.releaseExclusive();
+                        node = child;
+                        pos = 0;
+                        continue toLower;
                     }
                     pos += 2;
                 }
@@ -1068,10 +1268,10 @@ class _Tree implements View, Index {
      */
     final void rootDelete(_Node child) throws IOException {
         // Allocate stuff early in case of out of memory, and while root is latched. Note that
-        // stub is assigned a _NodeUsageList. Because the stub isn't in the list, attempting to
-        // update its position within it has no effect. Note too that the stub isn't placed
-        // into the database node map.
-        _Node stub = new _Node(mRoot.mUsageList);
+        // stub is assigned a _NodeContext. Because the stub isn't in the context usage list,
+        // attempting to update its position within it has no effect. Note too that the stub
+        // isn't placed into the database node map.
+        _Node stub = new _Node(mRoot.mContext);
 
         // Stub isn't in the node map, so use this pointer field to link the stubs together.
         stub.mNodeMapNext = mStubTail;
@@ -1120,7 +1320,11 @@ class _Tree implements View, Index {
      */
     final long redoStore(byte[] key, byte[] value) throws IOException {
         _RedoWriter redo = mDatabase.mRedoWriter;
-        return redo == null ? 0 : redo.store(mId, key, value, mDatabase.mDurabilityMode);
+        if (redo == null) {
+            return 0;
+        }
+        return mDatabase.anyTransactionContext().redoStoreAutoCommit
+            (redo.txnRedoWriter(), mId, key, value, mDatabase.mDurabilityMode);
     }
 
     /**
@@ -1128,7 +1332,11 @@ class _Tree implements View, Index {
      */
     final long redoStoreNoLock(byte[] key, byte[] value) throws IOException {
         _RedoWriter redo = mDatabase.mRedoWriter;
-        return redo == null ? 0 : redo.storeNoLock(mId, key, value, mDatabase.mDurabilityMode);
+        if (redo == null) {
+            return 0;
+        }
+        return mDatabase.anyTransactionContext().redoStoreNoLockAutoCommit
+            (redo.txnRedoWriter(), mId, key, value, mDatabase.mDurabilityMode);
     }
 
     final void txnCommitSync(_LocalTransaction txn, long commitPos) throws IOException {
@@ -1208,9 +1416,9 @@ class _Tree implements View, Index {
                             mDin.readFully(key);
 
                             if (mTaskCount < mTaskLimit) spawn: {
-                                Task task;
+                                Thread task;
                                 try {
-                                    task = new Task();
+                                    task = new Thread(() -> prime());
                                 } catch (Throwable e) {
                                     break spawn;
                                 }
@@ -1235,13 +1443,6 @@ class _Tree implements View, Index {
                     mTaskCount--;
                     notifyAll();
                 }
-            }
-        }
-
-        class Task extends Thread {
-            @Override
-            public void run() {
-                prime();
             }
         }
     }

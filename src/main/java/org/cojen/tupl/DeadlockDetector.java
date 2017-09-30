@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -52,9 +53,8 @@ final class DeadlockDetector {
 
     /**
      * @param lockType type of lock requested; TYPE_SHARED, TYPE_UPGRADABLE, or TYPE_EXCLUSIVE
-     * @param hash hash of lock key requested
      */
-    DeadlockSet newDeadlockSet(int lockType, int hash) {
+    DeadlockSet newDeadlockSet(int lockType) {
         DeadlockSet.OwnerInfo[] infoSet = new DeadlockSet.OwnerInfo[mLocks.size()];
 
         final LockManager manager = mOrigin.mManager;
@@ -77,7 +77,7 @@ final class DeadlockDetector {
             }
             info.mKey = key;
 
-            info.mAttachment = lock.findOwnerAttachment(mOrigin, lockType, hash);
+            info.mAttachment = lock.findOwnerAttachment(mOrigin, lockType);
 
             i++;
         }
@@ -117,7 +117,7 @@ final class DeadlockDetector {
             }
 
             LockOwner owner = lock.mOwner;
-            Object shared = lock.mSharedLockOwnersObj;
+            Object shared = lock.getSharedLockOwner();
 
             // If the owner is the locker, then it is trying to upgrade. It's
             // waiting for another locker to release the shared lock.
@@ -130,29 +130,27 @@ final class DeadlockDetector {
                 found |= scan(owner);
             }
 
-            scanShared: if (shared != null) {
-                if (shared instanceof Locker) {
-                    // Tail call.
-                    locker = (Locker) shared;
-                    continue outer;
-                }
+            if (shared instanceof LockOwner) {
+                // Tail call.
+                locker = (LockOwner) shared;
+                continue outer;
+            }
 
-                if (!(shared instanceof Lock.LockOwnerHTEntry[])) {
-                    break scanShared;
-                }
+            if (!(shared instanceof Lock.LockOwnerHTEntry[])) {
+                return found;
+            }
 
-                Lock.LockOwnerHTEntry[] entries = (Lock.LockOwnerHTEntry[]) shared;
-                for (int i=entries.length; --i>=0; ) {
-                    for (Lock.LockOwnerHTEntry e = entries[i]; e != null; ) {
-                        Lock.LockOwnerHTEntry next = e.mNext;
-                        if (i == 0 && next == null) {
-                            // Tail call.
-                            locker = e.mOwner;
-                            continue outer;
-                        }
-                        found |= scan(e.mOwner);
-                        e = next;
+            Lock.LockOwnerHTEntry[] entries = (Lock.LockOwnerHTEntry[]) shared;
+            for (int i=entries.length; --i>=0; ) {
+                for (Lock.LockOwnerHTEntry e = entries[i]; e != null; ) {
+                    Lock.LockOwnerHTEntry next = e.mNext;
+                    if (i == 0 && next == null) {
+                        // Tail call.
+                        locker = e.mOwner;
+                        continue outer;
                     }
+                    found |= scan(e.mOwner);
+                    e = next;
                 }
             }
 

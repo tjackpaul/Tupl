@@ -1,17 +1,18 @@
 /*
- *  Copyright 2014-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -19,6 +20,7 @@ package org.cojen.tupl;
 import java.io.IOException;
 
 import java.util.Arrays;
+import java.util.Comparator;
 
 /**
  * 
@@ -47,8 +49,18 @@ final class TransformedView implements View {
     }
 
     @Override
+    public Comparator<byte[]> getComparator() {
+        return mTransformer.transformedComparator(mSource.getComparator());
+    }
+
+    @Override
     public Cursor newCursor(Transaction txn) {
         return new TransformedCursor(mSource.newCursor(txn), mTransformer);
+    }
+
+    @Override
+    public Transaction newTransaction(DurabilityMode durabilityMode) {
+        return mSource.newTransaction(durabilityMode);
     }
 
     @Override
@@ -68,16 +80,51 @@ final class TransformedView implements View {
             return mTransformer.transformValue(mSource.load(txn, key), key, tkey);
         }
 
-        txn.enter();
+        LockResult result = mSource.touch(txn, key);
         try {
             byte[] value = mSource.load(txn, key);
-            if (value == null || (value = mTransformer.transformValue(value, key, tkey)) != null) {
-                // Keep the lock if value doesn't exist or if allowed by transformer.
-                txn.commit();
+            if (value != null
+                && (value = mTransformer.transformValue(value, key, tkey)) == null
+                && result == LockResult.ACQUIRED)
+            {
+                // Release the lock if value exists but was disallowed by the transformer.
+                txn.unlock();
             }
             return value;
-        } finally {
-            txn.exit();
+        } catch (Throwable e) {
+            throw ViewUtils.lockCleanup(e, txn, result);
+        }
+    }
+
+    @Override
+    public boolean exists(final Transaction txn, final byte[] tkey) throws IOException {
+        final byte[] key = inverseTransformKey(tkey);
+
+        if (key == null) {
+            return false;
+        }
+
+        if (!mTransformer.requireValue()) {
+            return mSource.exists(txn, key);
+        }
+
+        if (txn == null || !txn.lockMode().isRepeatable()) {
+            return mTransformer.transformValue(mSource.load(txn, key), key, tkey) != null;
+        }
+
+        LockResult result = mSource.touch(txn, key);
+        try {
+            byte[] value = mSource.load(txn, key);
+            if (value != null
+                && (value = mTransformer.transformValue(value, key, tkey)) == null
+                && result == LockResult.ACQUIRED)
+            {
+                // Release the lock if value exists but was disallowed by the transformer.
+                txn.unlock();
+            }
+            return value != null;
+        } catch (Throwable e) {
+            throw ViewUtils.lockCleanup(e, txn, result);
         }
     }
 
@@ -88,6 +135,9 @@ final class TransformedView implements View {
         final byte[] key = inverseTransformKey(tkey);
 
         if (key == null) {
+            if (tvalue == null) {
+                return;
+            }
             throw fail();
         }
 
@@ -101,34 +151,15 @@ final class TransformedView implements View {
         final byte[] key = inverseTransformKey(tkey);
 
         if (key == null) {
+            if (tvalue == null) {
+                return null;
+            }
             throw fail();
         }
 
         return mTransformer.transformValue
             (mSource.exchange(txn, key, mTransformer.inverseTransformValue(tvalue, key, tkey)),
              key, tkey);
-    }
-
-    @Override
-    public boolean insert(final Transaction txn, final byte[] tkey, final byte[] tvalue)
-        throws IOException
-    {
-        final byte[] key = inverseTransformKey(tkey);
-
-        if (key == null) {
-            if (tvalue == null) {
-                return true;
-            }
-            throw fail();
-        }
-
-        final byte[] value = mTransformer.inverseTransformValue(tvalue, key, tkey);
-
-        if (txn == null || txn.lockMode() == LockMode.UNSAFE) {
-            return mSource.insert(txn, key, value);
-        }
-
-        return condStore(txn, key, value, Cursor.NOT_LOADED);
     }
 
     @Override
@@ -143,34 +174,31 @@ final class TransformedView implements View {
 
         final byte[] value = mTransformer.inverseTransformValue(tvalue, key, tkey);
 
-        if (txn == null || txn.lockMode() == LockMode.UNSAFE) {
+        if (value == null) {
+            return mSource.delete(txn, key);
+        } else if (tvalue != null) {
             return mSource.replace(txn, key, value);
+        } else {
+            return mSource.update(txn, key, value);
         }
-
-        return condStore(txn, key, value, null);
     }
 
-    private boolean condStore(final Transaction txn, final byte[] key, final byte[] value,
-                              final byte[] failConditionValue)
+    @Override
+    public boolean update(final Transaction txn, final byte[] tkey, final byte[] tvalue)
         throws IOException
     {
-        Cursor c = mSource.newCursor(txn);
-        c.autoload(false);
+        final byte[] key = inverseTransformKey(tkey);
 
-        LockResult result = c.find(key);
-
-        if (c.value() == failConditionValue) {
-            c.reset();
-            if (result == LockResult.ACQUIRED) {
-                txn.unlock();
+        if (key == null) {
+            if (tvalue != null) {
+                return false;
             }
-            return false;
+            throw fail();
         }
 
-        c.store(value);
-        c.reset();
+        final byte[] value = mTransformer.inverseTransformValue(tvalue, key, tkey);
 
-        return true;
+        return mSource.update(txn, key, value);
     }
 
     @Override
@@ -193,58 +221,13 @@ final class TransformedView implements View {
         final byte[] oldValue = mTransformer.inverseTransformValue(oldTValue, key, tkey);
         final byte[] newValue = mTransformer.inverseTransformValue(newTValue, key, tkey);
 
-        if (txn == null || txn.lockMode() == LockMode.UNSAFE) {
-            return mSource.update(txn, key, oldValue, newValue);
-        }
-
-        return condUpdate(txn, key, oldValue, newValue);
-    }
-
-    private boolean condUpdate(final Transaction txn, final byte[] key,
-                               final byte[] oldValue, final byte[] newValue)
-        throws IOException
-    {
-        Cursor c = mSource.newCursor(txn);
-
-        LockResult result = c.find(key);
-
-        if (!Arrays.equals(c.value(), oldValue)) {
-            c.reset();
-            if (result == LockResult.ACQUIRED) {
-                txn.unlock();
-            }
-            return false;
-        }
-
-        c.store(newValue);
-        c.reset();
-
-        return true;
+        return mSource.update(txn, key, oldValue, newValue);
     }
 
     @Override
-    public boolean delete(final Transaction txn, final byte[] tkey) throws IOException {
-        final byte[] key = inverseTransformKey(tkey);
-        return key == null ? false : mSource.delete(txn, key);
-    }
-
-    @Override
-    public boolean remove(final Transaction txn, final byte[] tkey, final byte[] tvalue)
-        throws IOException
-    {
-        final byte[] key = inverseTransformKey(tkey);
-
-        if (key == null) {
-            return tvalue == null;
-        }
-
-        final byte[] value = mTransformer.inverseTransformValue(tvalue, key, tkey);
-
-        if (txn == null || txn.lockMode() == LockMode.UNSAFE) {
-            return mSource.remove(txn, key, value);
-        }
-
-        return condUpdate(txn, key, value, null);
+    public LockResult touch(Transaction txn, byte[] tkey) throws LockFailureException {
+        byte[] key = inverseTransformKey(tkey);
+        return key == null ? LockResult.UNOWNED : mSource.touch(txn, key);
     }
 
     @Override
@@ -459,7 +442,7 @@ final class TransformedView implements View {
              mTransformer);
     }
 
-    private static ViewConstraintException fail() {
+    static ViewConstraintException fail() {
         return new ViewConstraintException("Unsupported key");
     }
 }

@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -72,7 +73,7 @@ final class _PageManager {
      * Create a new _PageManager.
      */
     _PageManager(PageArray array) throws IOException {
-        this(false, array, DirectPageOps.p_null(), 0);
+        this(null, false, array, DirectPageOps.p_null(), 0);
     }
 
     /**
@@ -81,11 +82,14 @@ final class _PageManager {
      * @param header source for reading allocator root structure
      * @param offset offset into header
      */
-    _PageManager(PageArray array, long header, int offset) throws IOException {
-        this(true, array, header, offset);
+    _PageManager(EventListener debugListener, PageArray array, long header, int offset)
+        throws IOException
+    {
+        this(debugListener, true, array, header, offset);
     }
 
-    private _PageManager(boolean restored, PageArray array, long header, int offset)
+    private _PageManager(EventListener debugListener,
+                        boolean restored, PageArray array, long header, int offset)
         throws IOException
     {
         if (array == null) {
@@ -110,6 +114,11 @@ final class _PageManager {
             } else {
                 mTotalPageCount = readTotalPageCount(header, offset + I_TOTAL_PAGE_COUNT);
 
+                if (debugListener != null) {
+                    debugListener.notify(EventType.DEBUG, "TOTAL_PAGE_COUNT: %1$d",
+                                         mTotalPageCount);
+                }
+
                 long actualPageCount = array.getPageCount();
                 if (actualPageCount > mTotalPageCount) {
                     if (!array.isReadOnly()) {
@@ -123,19 +132,22 @@ final class _PageManager {
                 _PageQueue reserve;
                 fullLock();
                 try {
-                    mRegularFreeList.init(header, offset + I_REGULAR_QUEUE);
-                    mRecycleFreeList.init(header, offset + I_RECYCLE_QUEUE);
+                    mRegularFreeList.init(debugListener, header, offset + I_REGULAR_QUEUE);
+                    mRecycleFreeList.init(debugListener, header, offset + I_RECYCLE_QUEUE);
 
                     if (_PageQueue.exists(header, offset + I_RESERVE_QUEUE)) {
                         reserve = mRegularFreeList.newReserveFreeList();
                         try {
-                            reserve.init(header, offset + I_RESERVE_QUEUE);
+                            reserve.init(debugListener, header, offset + I_RESERVE_QUEUE);
                         } catch (Throwable e) {
                             reserve.delete();
                             throw e;
                         }
                     } else {
                         reserve = null;
+                        if (debugListener != null) {
+                            debugListener.notify(EventType.DEBUG, "Reserve free list is null");
+                        }
                     }
                 } finally {
                     fullUnlock();
@@ -449,7 +461,7 @@ final class _PageManager {
         target = list.getRemoveScanTarget();
         mRemoveLock.unlock();
 
-        commitLock.lock();
+        CommitLock.Shared shared = commitLock.acquireShared();
         try {
             while (mCompacting) {
                 mRemoveLock.lock();
@@ -466,12 +478,12 @@ final class _PageManager {
                     mRecycleFreeList.append(pageId);
                 }
                 if (commitLock.hasQueuedThreads()) {
-                    commitLock.unlock();
-                    commitLock.lock();
+                    shared.release();
+                    shared = commitLock.acquireShared();
                 }
             }
         } finally {
-            commitLock.unlock();
+            shared.release();
         }
 
         return false;

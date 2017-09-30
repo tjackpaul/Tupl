@@ -1,17 +1,18 @@
 /*
- *  Copyright 2012-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -36,18 +37,22 @@ public class RecoverTest {
         org.junit.runner.JUnitCore.main(RecoverTest.class.getName());
     }
 
+    protected void decorate(DatabaseConfig config) throws Exception {
+    }
+
     @Before
     public void createTempDb() throws Exception {
         mConfig = new DatabaseConfig()
             .directPageAccess(false)
             .checkpointRate(-1, null)
             .durabilityMode(DurabilityMode.NO_FLUSH);
-        mDb = newTempDatabase(mConfig);
+        decorate(mConfig);
+        mDb = newTempDatabase(getClass(), mConfig);
     }
 
     @After
     public void teardown() throws Exception {
-        deleteTempDatabases();
+        deleteTempDatabases(getClass());
         mDb = null;
         mConfig = null;
     }
@@ -70,7 +75,7 @@ public class RecoverTest {
             public void run() {
                 try {
                     Transaction txn2 = mDb.newTransaction();
-                    txn2.lockTimeout(10, TimeUnit.SECONDS);
+                    txn2.lockTimeout(60, TimeUnit.SECONDS);
                     assertEquals(null, ix.load(txn2, key));
                 } catch (Throwable e) {
                     ex = e;
@@ -80,7 +85,7 @@ public class RecoverTest {
 
         Waiter w = new Waiter();
         Thread t = new Thread(w);
-        t.start();
+        startAndWaitUntilBlocked(t);
 
         Thread.sleep(1000);
         mDb.close();
@@ -109,13 +114,13 @@ public class RecoverTest {
         Index ix = mDb.openIndex("test");
         ix.store(Transaction.BOGUS, key, value);
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
         assertNull(ix.load(Transaction.BOGUS, key));
         ix.store(Transaction.BOGUS, key, value);
         mDb.checkpoint();
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
         assertArrayEquals(value, ix.load(Transaction.BOGUS, key));
     }
@@ -130,7 +135,7 @@ public class RecoverTest {
         ix.store(txn, key, value);
         txn.commit();
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
         txn = mDb.newTransaction(DurabilityMode.NO_REDO);
         assertNull(ix.load(txn, key));
@@ -138,7 +143,7 @@ public class RecoverTest {
         txn.commit();
         mDb.checkpoint();
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
         assertArrayEquals(value, ix.load(null, key));
     }
@@ -158,7 +163,7 @@ public class RecoverTest {
         txn = mDb.newTransaction();
         ix.store(txn, key, null);
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
         assertArrayEquals(value, ix.load(null, key));
 
@@ -166,9 +171,33 @@ public class RecoverTest {
         ix.store(txn, key, null);
         txn.commit();
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
         assertEquals(null, ix.load(null, key));
+    }
+
+    @Test
+    public void recoverDeleteGhost() throws Exception {
+        byte[] k1 = "k1".getBytes();
+        byte[] k2 = "k2".getBytes();
+        byte[] value = "value".getBytes();
+
+        Index ix = mDb.openIndex("test");
+
+        Transaction txn = mDb.newTransaction();
+        ix.store(txn, k2, value);
+        txn.commit();
+
+        txn = mDb.newTransaction();
+        ix.store(txn, k2, null);
+        mDb.checkpoint();
+        ix.store(txn, k1, value);
+        txn.commit();
+
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
+        ix = mDb.openIndex("test");
+        assertArrayEquals(value, ix.load(null, k1));
+        assertEquals(null, ix.load(null, k2));
     }
 
     @Test
@@ -239,7 +268,7 @@ public class RecoverTest {
             txn.commit();
         } txn.exit();
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
 
         assertArrayEquals("v1".getBytes(), ix.load(null, "a".getBytes()));
@@ -289,6 +318,17 @@ public class RecoverTest {
     @Test
     public void largeUndoExit() throws Exception {
         for (int chkpnt = 0; chkpnt <= 4; chkpnt++) {
+            /* FIXME
+               largeUndoExit(org.cojen.tupl.RecoverTest)  Time elapsed: 2.916 s  <<< FAILURE!
+               java.lang.AssertionError: expected:<0> but was:<1>
+               at org.junit.Assert.fail(Assert.java:88)
+               at org.junit.Assert.failNotEquals(Assert.java:743)
+               at org.junit.Assert.assertEquals(Assert.java:118)
+               at org.junit.Assert.assertEquals(Assert.java:555)
+               at org.junit.Assert.assertEquals(Assert.java:542)
+               at org.cojen.tupl.RecoverTest.testRecover(RecoverTest.java:419)
+               at org.cojen.tupl.RecoverTest.largeUndoExit(RecoverTest.java:321)
+            */
             testRecover(10000, false, true, chkpnt);
         }
     }
@@ -377,7 +417,7 @@ public class RecoverTest {
             mDb.checkpoint();
         }
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         assertTrue(mDb.verify(null));
 
         ix1 = mDb.openIndex("test1");
@@ -387,7 +427,7 @@ public class RecoverTest {
 
         if (!commit) {
             assertEquals(0, CrudTest.count(ix1));
-            assertEquals(0, CrudTest.count(ix2));
+            assertEquals(0, CrudTest.count(ix2)); // FIXME: failed here
         }
 
         if (commit) {
@@ -455,7 +495,7 @@ public class RecoverTest {
         txn.reset();
 
         // Reopen, but delete the redo logs first.
-        mDb = reopenTempDatabase(mDb, mConfig, true);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig, true);
 
         ix1 = mDb.openIndex("test1");
         ix2 = mDb.openIndex("test2");
@@ -508,13 +548,13 @@ public class RecoverTest {
         ix.drop();
         assertNull(mDb.findIndex("drop"));
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
 
         // Verify drop redo.
         assertNull(mDb.findIndex("drop"));
 
         // Test again, but this time with NO_REDO.
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
 
         ix = mDb.openIndex("drop2");
         ix.store(null, "hello".getBytes(), "world".getBytes());
@@ -534,7 +574,7 @@ public class RecoverTest {
 
         assertNull(mDb.findIndex("drop2"));
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
 
         // Even though the delete operation was no-redo, the drop always is. It will ensure
         // everything is deleted first.
@@ -558,7 +598,7 @@ public class RecoverTest {
             txn.reset();
         }
 
-        File baseFile = baseFileForTempDatabase(mDb);
+        File baseFile = baseFileForTempDatabase(getClass(), mDb);
 
         File redoFile = null;
         for (File f : baseFile.getParentFile().listFiles()) {
@@ -648,7 +688,7 @@ public class RecoverTest {
         Index ix2 = mDb.openIndex("test2");
         ix2.store(null, "hello".getBytes(), "world".getBytes());
 
-        File primer = new File(baseFileForTempDatabase(mDb).getPath() + ".primer");
+        File primer = new File(baseFileForTempDatabase(getClass(), mDb).getPath() + ".primer");
         assertFalse(primer.exists());
 
         mDb.close();
@@ -656,13 +696,13 @@ public class RecoverTest {
 
         mConfig.cachePriming(true);
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         assertFalse(primer.exists());
 
         mDb.close();
         assertTrue(primer.exists());
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         assertFalse(primer.exists());
     }
 
@@ -678,7 +718,7 @@ public class RecoverTest {
         // Moves ix into the trash
         mDb.deleteIndex(ix);
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         assertNull(mDb.findIndex("trash"));
     }
 
@@ -690,7 +730,230 @@ public class RecoverTest {
         mDb.checkpoint();
 
         // Re-opening will start background job to delete trashed index.
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         assertNull(mDb.findIndex(ixname));
+    }
+
+    @Test
+    public void rollbackDeadlock() throws Exception {
+        // Rollbacks must release their locks before any other commits appear in the log, or
+        // else recovery can deadlock or timeout.
+
+        Index ix = mDb.openIndex("trash");
+
+        Transaction t1 = mDb.newTransaction(DurabilityMode.NO_FLUSH);
+        ix.store(t1, "hello".getBytes(), "world".getBytes());
+        // Force a flush of TransactionContext with a big value.
+        ix.store(t1, "xxx".getBytes(), new byte[100_000]);
+        t1.exit();
+
+        Transaction t2 = mDb.newTransaction(DurabilityMode.SYNC);
+        ix.store(t2, "hello".getBytes(), "world!!!".getBytes());
+        t2.commit();
+
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
+
+        ix = mDb.openIndex("trash");
+        assertArrayEquals("world!!!".getBytes(), ix.load(null, "hello".getBytes()));
+        assertNull(ix.load(null, "xxx".getBytes()));
+    }
+
+    @Test
+    public void lostRollback() throws Exception {
+        // A transaction which auto-resets due to an exception must alway issue a rollback
+        // operation into the redo log.
+
+        byte[] k1 = "key1".getBytes();
+        byte[] k2 = "key2".getBytes();
+
+        Index ix = mDb.openIndex("test");
+
+        Transaction t1 = mDb.newTransaction();
+        // lock k1 and write to redo log
+        ix.store(t1, k1, k1);
+
+        Transaction t2 = mDb.newTransaction();
+        // lock k2 and write to redo log
+        ix.store(t2, k2, k2);
+
+        // Perform an operation which auto-resets the transaction on lock timeout. The default
+        // Cursor.commit method calls ViewUtils.commit, which resets the transaction if an
+        // exception is thrown. In case the implementation ever changes, the original code is
+        // copied here.
+        Cursor c = ix.newCursor(t2);
+        t2.lockMode(LockMode.UNSAFE);
+        c.find(k1);
+        t2.lockMode(LockMode.UPGRADABLE_READ);
+        byte[] value = "v2".getBytes();
+        try {
+            // Same as ViewUtils.commit (except with test assertions added).
+            try {
+                c.store(value);
+            } catch (Throwable e) {
+                Transaction txn = c.link();
+                if (txn != null) {
+                    txn.reset(e);
+                } else {
+                    fail("no linked transaction");
+                }
+                throw e;
+            }
+
+            fail("should not be reached");
+        } catch (LockTimeoutException e) {
+            // Expected.
+        }
+
+        // Transaction t1 can write k2, since t1 has released all of its locks.
+        ix.store(t1, k2, k2);
+        t1.commit();
+
+        // If t1 didn't issue a rollback, then recovery will deadlock or fail on the second
+        // attempt to lock k2. A replicated log will deadlock, but a local redo log throws a
+        // LockTimeoutException and aborts recovery.
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
+
+        ix = mDb.openIndex("test");
+        assertArrayEquals(k1, ix.load(null, k1));
+        assertArrayEquals(k2, ix.load(null, k2));
+    }
+
+    @Test
+    public void manyOpenTransactions() throws Exception {
+        // Test which ensures that the master undo log can properly track all active
+        // transactions, even when multiple undo log nodes are required to encode them all.
+
+        Index ix = mDb.openIndex("test");
+
+        Transaction[] txns = new Transaction[1000];
+
+        for (int i=0; i<txns.length; i++) {
+            txns[i] = mDb.newTransaction();
+            ix.store(txns[i], ("key-" + i).getBytes(), ("value-" + i).getBytes());
+        }
+
+        mDb.checkpoint();
+
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
+
+        // Everything should have rolled back.
+        ix = mDb.openIndex("test");
+        assertEquals(0, ix.count(null, null));
+    }
+
+    @Test
+    public void largeUndoMidCheckpoint() throws Exception {
+        // Test commit of a transaction with a large undo log, with a checkpoint in the middle
+        // of it. This exersizes handling of the OP_COMMIT_TRUNCATE operation during recovery.
+
+        final Index ix = mDb.openIndex("test");
+        Random rnd = new Random(3494847);
+
+        Transaction txn = mDb.newTransaction();
+        for (int i=0; i<100_000; i++) {
+            byte[] key = randomStr(rnd, 10, 5000);
+            byte[] value = randomStr(rnd, 10, 50);
+            ix.store(txn, key, value);
+        }
+
+        Thread checkpointer = new Thread(() -> {
+            try {
+                Thread.sleep(100);
+
+                // Start another write, for the the commit lock to indicate that it has queued
+                // waiters when the checkpoint is waiting to acquire the exclusive commit lock.
+                new Thread(() -> {
+                    try {
+                        Thread.sleep(100);
+                        ix.store(null, "hello".getBytes(), "world".getBytes());
+                    } catch (Exception e) {
+                    }
+                }).start();
+
+                mDb.checkpoint();
+            } catch (Exception e) {
+                Utils.rethrow(e);
+            }
+        });
+
+        checkpointer.start();
+
+        txn.commit();
+
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
+
+        // Everything should have committed.
+
+        Index ix2 = mDb.openIndex("test");
+
+        rnd = new Random(3494847);
+
+        for (int i=0; i<100_000; i++) {
+            byte[] key = randomStr(rnd, 10, 5000);
+            byte[] value = randomStr(rnd, 10, 50);
+            fastAssertArrayEquals(value, ix2.load(null, key));
+        }
+    }
+
+    @Test
+    public void testUndoNonReplicatedTransaction() throws Exception {
+        DatabaseConfig config = new DatabaseConfig()
+                .directPageAccess(false)
+                .checkpointRate(-1, null)
+                .durabilityMode(DurabilityMode.SYNC);
+
+        decorate(config);
+
+        // open database with NonReplicationManager
+        NonReplicationManager replMan = new NonReplicationManager();
+        config.replicate(replMan);
+        Database db = newTempDatabase(getClass(), config);
+
+        // open index
+        replMan.asLeader();
+        Thread.yield();
+        Index ix = null;
+        for (int i=0; i<10; i++) {
+            try {
+                ix = db.openIndex("test");
+                break;
+            } catch (UnmodifiableReplicaException e) {
+                // Wait for replication thread to finish the switch.
+                Thread.sleep(100);
+            }
+        }
+        assertTrue(ix != null);
+
+        db.checkpoint();
+
+        // switch to replica
+        replMan.asReplica();
+        try {
+            ix.store(null, "somekey".getBytes(), "someval".getBytes());
+            fail();
+        } catch (UnmodifiableReplicaException e) {
+            // Expected.
+        }
+
+        // checkpoint with a live open transaction
+        Transaction txn = db.newTransaction(DurabilityMode.NO_REDO);
+        ix.store(txn, "key1".getBytes(), "val1".getBytes());
+        db.checkpoint();
+        db.close();
+
+        // reopen database as replica; use new ReplicationManager as the existing one is closed
+        replMan = new NonReplicationManager();
+        replMan.asReplica();
+        Database db2 = Database.open(config.replicate(replMan));
+
+        // FIXME: must wait till caught up
+
+        // assert no lingering locks exist on the key after recovery
+        Index ix2 = db2.findIndex("test");
+        assertTrue(ix2 != null);
+        Transaction txn2 = db2.newTransaction();
+        assertTrue(ix2.tryLockExclusive(txn2, "key1".getBytes(), 1).isHeld());
+
+        db2.close();
     }
 }

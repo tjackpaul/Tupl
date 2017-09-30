@@ -1,17 +1,18 @@
 /*
- *  Copyright 2013-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl.io;
@@ -27,13 +28,17 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 
 import java.nio.Buffer;
+import java.nio.ByteBuffer;
 
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Generic data and I/O utility methods.
@@ -117,6 +122,7 @@ public class Utils {
         }
     }
 
+    @SuppressWarnings("unused")
     private static int doCompareUnsigned(byte[] a, byte[] b) {
         return doCompareUnsigned(a, 0, a.length, b, 0, b.length);
     }
@@ -138,6 +144,7 @@ public class Utils {
     /**
      * Adapts the offset/length form to work with the start/end form.
      */
+    @SuppressWarnings("unused")
     private static int compareUnsignedAdapter(byte[] a, int aoff, int alen,
                                               byte[] b, int boff, int blen)
         throws Throwable
@@ -437,47 +444,87 @@ public class Utils {
      */
     public static void readFully(InputStream in, byte[] b, int off, int len) throws IOException {
         if (len > 0) {
-            while (true) {
-                int amt = in.read(b, off, len);
-                if (amt <= 0) {
-                    throw new EOFException();
-                }
-                if ((len -= amt) <= 0) {
-                    break;
-                }
-                off += amt;
-            }
+            doReadFully(in, b, off, len);
         }
     }
 
-    private static volatile boolean cDeleteUnsupported;
+    private static void doReadFully(InputStream in, byte[] b, int off, int len)
+        throws IOException
+    {
+        while (true) {
+            int amt = in.read(b, off, len);
+            if (amt <= 0) {
+                throw new EOFException();
+            }
+            if ((len -= amt) <= 0) {
+                break;
+            }
+            off += amt;
+        }
+    }
+
+    private static volatile int cDeleteSupport;
 
     /**
      * Attempt to delete the given direct or mapped byte buffer.
      */
     public static boolean delete(Buffer bb) {
+        return bb instanceof ByteBuffer ? delete((ByteBuffer) bb) : false;
+    }
+
+    /**
+     * Attempt to delete the given direct or mapped byte buffer.
+     */
+    @SuppressWarnings("restriction")
+    public static boolean delete(ByteBuffer bb) {
+        if (!bb.isDirect()) {
+            return false;
+        }
+
         // http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=4724038
-        if (!cDeleteUnsupported) {
+
+        int deleteSupport = cDeleteSupport;
+
+        if (deleteSupport < 0) {
+            return false;
+        }
+
+        if (deleteSupport == 0) {
             try {
                 Method m = bb.getClass().getMethod("cleaner");
-                if (m != null) {
-                    m.setAccessible(true);
-                    Object cleaner = m.invoke(bb);
-                    if (cleaner != null) {
-                        m = cleaner.getClass().getMethod("clean");
-                        if (m != null) {
-                            m.setAccessible(true);
-                            m.invoke(cleaner);
-                            return true;
-                        }
-                    }
+                m.setAccessible(true);
+                Object cleaner = m.invoke(bb);
+                if (cleaner == null) {
+                    // No cleaner, so nothing to do.
+                    return false;
                 }
+                m = cleaner.getClass().getMethod("clean");
+                m.setAccessible(true);
+                m.invoke(cleaner);
+                return true;
             } catch (Exception e) {
-                cDeleteUnsupported = true;
+                // Try another way.
+                cDeleteSupport = 1;
             }
         }
 
-        return false;
+        try {
+            sun.misc.Unsafe u = UnsafeAccess.obtain();
+            Method m = u.getClass().getMethod("invokeCleaner", ByteBuffer.class);
+            m.invoke(u, bb);
+            return true;
+        } catch (InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof IllegalArgumentException) {
+                // Duplicate or slice.
+                return false;
+            }
+            throw rethrow(cause);
+        } catch (Exception e) {
+            // Unsupported.
+            cDeleteSupport = -1;
+            return false;
+        }
     }
 
     private static Map<Closeable, Thread> cCloseThreads;
@@ -567,6 +614,25 @@ public class Utils {
     }
 
     /**
+     * Closes a resource without throwing another exception.
+     *
+     * @param resource can be null
+     */
+    public static void closeQuietly(Closeable resource) {
+        closeQuietly(null, resource);
+    }
+
+    /**
+     * Closes a resource without throwing another exception.
+     *
+     * @param resource can be null
+     * @param cause passed to resource if it implements {@link CauseCloseable}
+     */
+    public static void closeQuietly(Closeable resource, Throwable cause) {
+        closeQuietly(null, resource, cause);
+    }
+
+    /**
      * Closes a resource without throwing another exception. If closing a chain of resources,
      * pass in the first caught exception, and all others are discarded.
      *
@@ -624,11 +690,79 @@ public class Utils {
     }
 
     /**
+     * Add a suppressed exception without creating a circular reference or throwing a new
+     * exception.
+     *
+     * @param target exception to receive suppressed exception; can be null
+     * @param toSuppress exception to suppress and add to target; can be null
+     */
+    public static void suppress(Throwable target, Throwable toSuppress) {
+        try {
+            if (target == null || toSuppress == null || target == toSuppress) {
+                return;
+            }
+
+            // TODO: Should examine the entire cause chain in search of duplicates.
+            if (target.getCause() == toSuppress || toSuppress.getCause() == target) {
+                return;
+            }
+
+            Throwable[] s1 = target.getSuppressed();
+            Throwable[] s2 = toSuppress.getSuppressed();
+
+            if (s1.length != 0 || s2.length != 0) {
+                Set<Throwable> all = new HashSet<>();
+                all.add(target);
+                if (!gatherSuppressed(all, s1) || !gatherSuppressed(all, s2)) {
+                    return;
+                }
+                if (all.contains(toSuppress)) {
+                    return;
+                }
+            }
+
+            target.addSuppressed(toSuppress);
+        } catch (Throwable e2) {
+            // Ignore.
+        }
+    }
+
+    /**
+     * @return false if duplicates found
+     */
+    private static boolean gatherSuppressed(Set<Throwable> all, Throwable[] suppressed) {
+        for (Throwable s : suppressed) {
+            if (!gatherSuppressed(all, s)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @return false if duplicates found
+     */
+    private static boolean gatherSuppressed(Set<Throwable> all, Throwable e) {
+        if (!all.add(e)) {
+            return false;
+        }
+        for (Throwable s : e.getSuppressed()) {
+            if (!gatherSuppressed(all, s)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Returns the root cause of the given exception.
      *
      * @return non-null cause, unless given exception was null
      */
     public static Throwable rootCause(Throwable e) {
+        if (e == null) {
+            return null;
+        }
         while (true) {
             Throwable cause = e.getCause();
             if (cause == null) {

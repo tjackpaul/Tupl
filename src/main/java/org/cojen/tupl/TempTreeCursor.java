@@ -1,17 +1,18 @@
 /*
- *  Copyright 2016 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -34,65 +35,8 @@ final class TempTreeCursor extends TreeCursor {
     }
 
     @Override
-    public final void store(byte[] value) throws IOException {
-        byte[] key = mKey;
-        ViewUtils.positionCheck(key);
-
-        try {
-            final LocalTransaction txn = mTxn;
-            if (txn == null) {
-                store(LocalTransaction.BOGUS, leafExclusive(), value);
-            } else {
-                if (txn.lockMode() != LockMode.UNSAFE) {
-                    txn.lockExclusive(mTree.mId, key, keyHash());
-                }
-                CursorFrame leaf = leafExclusive();
-                final DurabilityMode dmode = txn.durabilityMode();
-                if (dmode == DurabilityMode.NO_REDO) {
-                    store(txn, leaf, value);
-                } else {
-                    txn.durabilityMode(DurabilityMode.NO_REDO);
-                    try {
-                        store(txn, leaf, value);
-                    } finally {
-                        txn.durabilityMode(dmode);
-                    }
-                }
-            }
-        } catch (Throwable e) {
-            throw handleException(e, false);
-        }
-    }
-
-    @Override
-    public final void commit(byte[] value) throws IOException {
-        byte[] key = mKey;
-        ViewUtils.positionCheck(key);
-
-        try {
-            final LocalTransaction txn = mTxn;
-            if (txn == null) {
-                store(LocalTransaction.BOGUS, leafExclusive(), value);
-            } else {
-                if (txn.lockMode() != LockMode.UNSAFE) {
-                    txn.lockExclusive(mTree.mId, key, keyHash());
-                }
-                CursorFrame leaf = leafExclusive();
-                final DurabilityMode dmode = txn.durabilityMode();
-                if (dmode == DurabilityMode.NO_REDO) {
-                    store(txn, leaf, value);
-                } else {
-                    txn.durabilityMode(DurabilityMode.NO_REDO);
-                    try {
-                        store(txn, leaf, value);
-                    } finally {
-                        txn.durabilityMode(dmode);
-                    }
-                }
-                txn.commit();
-            }
-        } catch (Throwable e) {
-            throw handleException(e, false);
-        }
+    protected int storeMode() {
+        // Never redo.
+        return 2;
     }
 }

@@ -1,26 +1,26 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
 
+import java.io.Flushable;
 import java.io.IOException;
 
 import java.util.concurrent.TimeUnit;
-
-import java.util.concurrent.locks.Lock;
 
 /**
  * Defines a logical unit of work. Transaction instances can only be safely
@@ -55,7 +55,7 @@ import java.util.concurrent.locks.Lock;
  * @author Brian S O'Neill
  * @see Database#newTransaction Database.newTransaction
  */
-public interface Transaction {
+public interface Transaction extends Flushable {
     /**
      * Transaction instance which isn't a transaction at all. It always
      * operates in an {@link LockMode#UNSAFE unsafe} lock mode and a {@link
@@ -157,6 +157,22 @@ public interface Transaction {
     void reset() throws IOException;
 
     /**
+     * Reset the transaction due to the given cause. This provides an opportunity to prevent
+     * this transaction from being used any further. No exception is thrown when invoking this
+     * method.
+     *
+     * @param cause pass a cause to reset and disable the transaction; pass null to simply
+     * reset the transaction and ignore any exception when doing so
+     */
+    default void reset(Throwable cause) {
+        try {
+            reset();
+        } catch (Throwable e) {
+            // Ignore.
+        }
+    }
+
+    /**
      * Attempts to acquire a shared lock for the given key, denying exclusive
      * locks. If return value is {@link LockResult#alreadyOwned owned}, transaction
      * already owns a strong enough lock, and no extra unlock should be
@@ -164,7 +180,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link
      * LockResult#OWNED_SHARED OWNED_SHARED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
@@ -183,7 +200,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
      * LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
@@ -200,7 +218,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link LockResult#UPGRADED
      * UPGRADED}, or {@link LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
      * @throws LockFailureException if interrupted, timed out, or illegal upgrade
@@ -217,7 +236,9 @@ public interface Transaction {
      * @param message message to pass to transaction handler
      * @param indexId index for lock acquisition; zero if not applicable
      * @param key key which has been locked exclusively; null if not applicable
-     * @throws IllegalStateException if no transaction handler is installed
+     * @throws IllegalStateException if no transaction handler is installed; if index and key
+     * are provided but lock isn't held
+     * @throws IllegalArgumentException if index id is zero and key is non-null
      * @see org.cojen.tupl.ext.TransactionHandler
      */
     void customRedo(byte[] message, long indexId, byte[] key) throws IOException;
@@ -252,7 +273,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#INTERRUPTED INTERRUPTED}, {@link
      * LockResult#TIMED_OUT_LOCK TIMED_OUT_LOCK}, {@link LockResult#ACQUIRED
@@ -273,7 +295,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link
      * LockResult#OWNED_SHARED OWNED_SHARED}, {@link
@@ -296,7 +319,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#ILLEGAL ILLEGAL}, {@link
      * LockResult#INTERRUPTED INTERRUPTED}, {@link LockResult#TIMED_OUT_LOCK
@@ -316,7 +340,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link
      * LockResult#OWNED_UPGRADABLE OWNED_UPGRADABLE}, or {@link
@@ -336,7 +361,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#ILLEGAL ILLEGAL}, {@link
      * LockResult#INTERRUPTED INTERRUPTED}, {@link LockResult#TIMED_OUT_LOCK
@@ -356,7 +382,8 @@ public interface Transaction {
      *
      * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @param key non-null key to lock; instance is not cloned
+     * @param key non-null key to lock; instance is not cloned and so it must not be modified
+     * after calling this method
      * @param nanosTimeout maximum time to wait for lock; negative timeout is infinite
      * @return {@link LockResult#ACQUIRED ACQUIRED}, {@link LockResult#UPGRADED
      * UPGRADED}, or {@link LockResult#OWNED_EXCLUSIVE OWNED_EXCLUSIVE}
@@ -399,45 +426,49 @@ public interface Transaction {
     byte[] lastLockedKey();
 
     /**
-     * Fully releases last lock acquired, within the current scope. If the last
-     * lock operation was an upgrade, for a lock not immediately acquired,
-     * unlock is not allowed. Instead, an IllegalStateException is thrown.
+     * Fully releases the last lock or group acquired, within the current scope. If the last
+     * lock operation was an upgrade, for a lock not immediately acquired, unlock is not
+     * allowed. Instead, an IllegalStateException is thrown.
      *
-     * <p><i>Note: This method is intended for advanced use cases.</i> Also, the current
-     * implementation does not accurately track scopes. It may permit an unlock operation to
-     * cross a scope boundary, which has undefined behavior.
+     * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @throws IllegalStateException if no locks held, or if unlocking a
-     * non-immediate upgrade
+     * @throws IllegalStateException if no locks held, or if crossing a scope boundary, or if
+     * unlocking a non-immediate upgrade
      */
     void unlock();
 
     /**
-     * Releases last lock acquired, within the current scope, retaining a
-     * shared lock. If the last lock operation was an upgrade, for a lock not
-     * immediately acquired, unlock is not allowed. Instead, an
-     * IllegalStateException is thrown.
+     * Releases the last lock or group acquired, within the current scope, retaining a shared
+     * lock. If the last lock operation was an upgrade, for a lock not immediately acquired,
+     * unlock is not allowed. Instead, an IllegalStateException is thrown.
      *
-     * <p><i>Note: This method is intended for advanced use cases.</i> Also, the current
-     * implementation does not accurately track scopes. It may permit an unlock operation to
-     * cross a scope boundary, which has undefined behavior.
+     * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @throws IllegalStateException if no locks held, or if too many shared
-     * locks, or if unlocking a non-immediate upgrade
+     * @throws IllegalStateException if no locks held, or if crossing a scope boundary, or if
+     * too many shared locks, or if unlocking a non-immediate upgrade
      */
     void unlockToShared();
 
     /**
-     * Releases last lock acquired or upgraded, within the current scope,
+     * Releases the last lock or group acquired or upgraded, within the current scope,
      * retaining an upgradable lock.
      *
-     * <p><i>Note: This method is intended for advanced use cases.</i> Also, the current
-     * implementation does not accurately track scopes. It may permit an unlock operation to
-     * cross a scope boundary, which has undefined behavior.
+     * <p><i>Note: This method is intended for advanced use cases.</i>
      *
-     * @throws IllegalStateException if no locks held, or if last lock is shared
+     * @throws IllegalStateException if no locks held, or if crossing a scope boundary, or if
+     * last lock is shared
      */
     void unlockToUpgradable();
+
+    /**
+     * Combines the last lock acquired or upgraded into a group which can be unlocked together.
+     *
+     * <p><i>Note: This method is intended for advanced use cases.</i>
+     *
+     * @throws IllegalStateException if no locks held, or if crossing a scope boundary, or if
+     * combining an acquire with an upgrade
+     */
+    void unlockCombine();
 
     /**
      * Attach an arbitrary object to this transaction instance, for tracking it. Attachments

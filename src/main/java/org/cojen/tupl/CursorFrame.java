@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -24,10 +25,13 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
  *
  * @author Brian S O'Neill
  */
+@SuppressWarnings("serial")
 /*P*/
 // Note: Atomic reference is to the next frame bound to a Node.
-final class CursorFrame extends AtomicReference<CursorFrame> {
-    private static final int SPIN_LIMIT = Runtime.getRuntime().availableProcessors();
+class CursorFrame extends AtomicReference<CursorFrame> {
+    // Under contention a thread will initially spin up to SPIN_LIMIT before yielding, after
+    // which it more aggressively spins up to 2 * SPIN_LIMIT before additional yields.
+    private static final int SPIN_LIMIT = Runtime.getRuntime().availableProcessors() > 1 ? 1 << 10 : 0;
 
     private static final CursorFrame REBIND_FRAME = new CursorFrame();
 
@@ -61,7 +65,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      *
      * @return frame node
      */
-    Node acquireShared() {
+    final Node acquireShared() {
         Node node = mNode;
         while (true) {
             node.acquireShared();
@@ -79,7 +83,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      *
      * @return frame node, or null if not acquired
      */
-    Node tryAcquireShared() {
+    final Node tryAcquireShared() {
         Node node = mNode;
         while (node.tryAcquireShared()) {
             Node actualNode = mNode;
@@ -97,7 +101,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      *
      * @return frame node
      */
-    Node acquireExclusive() {
+    final Node acquireExclusive() {
         Node node = mNode;
         while (true) {
             node.acquireExclusive();
@@ -113,9 +117,28 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
     /**
      * Acquire an exclusive latch on this frame's bound node.
      *
+     * @return frame node, or null if not not bound
+     */
+    final Node acquireExclusiveIfBound() {
+        Node node = mNode;
+        while (node != null) {
+            node.acquireExclusive();
+            Node actualNode = mNode;
+            if (actualNode == node) {
+                return actualNode;
+            }
+            node.releaseExclusive();
+            node = actualNode;
+        }
+        return null;
+    }
+
+    /**
+     * Acquire an exclusive latch on this frame's bound node.
+     *
      * @return frame node, or null if not acquired
      */
-    Node tryAcquireExclusive() {
+    final Node tryAcquireExclusive() {
         Node node = mNode;
         while (node.tryAcquireExclusive()) {
             Node actualNode = mNode;
@@ -131,7 +154,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
     /**
      * @param amount +/- 2
      */
-    void adjustParentPosition(int amount) {
+    final void adjustParentPosition(int amount) {
         CursorFrame parent = mParentFrame;
         if (parent != null) {
             parent.mNodePos += amount;
@@ -142,15 +165,14 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      * Bind this unbound frame to a tree node. Node should be held with a shared or exclusive
      * latch.
      */
-    void bind(Node node, int nodePos) {
+    final void bind(Node node, int nodePos) {
         mNode = node;
         mNodePos = nodePos;
 
         // Next is set to self to indicate that this frame is the last.
         this.set(this);
 
-        int trials = 0;
-        while (true) {
+        for (int trials = SPIN_LIMIT;;) {
             CursorFrame last = node.mLastCursorFrame;
             mPrevCousin = last;
             if (last == null) {
@@ -190,12 +212,10 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
                 return;
             }
 
-            trials++;
-
-            if (trials >= SPIN_LIMIT) {
+            if (--trials < 0) {
                 // Spinning too much due to high contention. Back off a tad.
                 Thread.yield();
-                trials = 0;
+                trials = SPIN_LIMIT << 1;
             }
         }
     }
@@ -206,7 +226,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      *
      * @throws IllegalStateException if bound to another node
      */
-    void bindOrReposition(Node node, int nodePos) {
+    final void bindOrReposition(Node node, int nodePos) {
         if (mNode == null) {
             bind(node, nodePos);
         } else if (mNode == node) {
@@ -220,7 +240,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      * Rebind this already bound frame to another tree node, unless this frame is no longer
      * valid. Both Nodes should be held with an exclusive latch.
      */
-    void rebind(Node node, int nodePos) {
+    final void rebind(Node node, int nodePos) {
         // Unbind with a special marker, to prevent a concurrent full unbind operation from
         // thinking that the node is already unbound. The marker will force the other thread to
         // wait until the rebind is complete before unbinding.
@@ -238,8 +258,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      * @param to null to fully unbind and never use frame again, or REBIND_FRAME if rebinding
      */
     private boolean unbind(CursorFrame to) {
-        int trials = 0;
-        while (true) {
+        for (int trials = SPIN_LIMIT;;) {
             CursorFrame n = this.get(); // get next frame
 
             if (n == null) {
@@ -280,12 +299,10 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
                 }
             }
 
-            trials++;
-
-            if (trials >= SPIN_LIMIT) {
+            if (--trials < 0) {
                 // Spinning too much due to high contention. Back off a tad.
                 Thread.yield();
-                trials = 0;
+                trials = SPIN_LIMIT << 1;
             }
         }
     }
@@ -296,9 +313,8 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      * @param lock non-null temporary frame to represent locked state
      * @return frame to pass to unlock method, or null if frame is not bound
      */
-    CursorFrame tryLock(CursorFrame lock) {
-        int trials = 0;
-        while (true) {
+    final CursorFrame tryLock(CursorFrame lock) {
+        for (int trials = SPIN_LIMIT;;) {
             CursorFrame n = this.get(); // get next frame
 
             if (n == null) {
@@ -325,12 +341,10 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
                 }
             }
 
-            trials++;
-
-            if (trials >= SPIN_LIMIT) {
+            if (--trials < 0) {
                 // Spinning too much due to high contention. Back off a tad.
                 Thread.yield();
-                trials = 0;
+                trials = SPIN_LIMIT << 1;
             }
         }
     }
@@ -341,7 +355,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      * @param lock non-null temporary frame to represent locked state
      * @return previous frame, or null if no previous frame exists
      */
-    CursorFrame tryLockPrevious(CursorFrame lock) {
+    final CursorFrame tryLockPrevious(CursorFrame lock) {
         CursorFrame p;
         do {
             p = this.mPrevCousin;
@@ -354,21 +368,21 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      *
      * @param n non-null next frame, as provided by the tryLock method
      */
-    void unlock(CursorFrame n) {
+    final void unlock(CursorFrame n) {
         this.set(n);
     }
 
     /**
      * Returns the parent frame. No latch is required.
      */
-    CursorFrame peek() {
+    final CursorFrame peek() {
         return mParentFrame;
     }
 
     /**
      * Pop this, the leaf frame, returning the parent frame. No latch is required.
      */
-    CursorFrame pop() {
+    final CursorFrame pop() {
         unbind(null);
         CursorFrame parent = mParentFrame;
         mNode = null;
@@ -380,7 +394,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
     /**
      * Pop this, the leaf frame, returning void. No latch is required.
      */
-    void popv() {
+    final void popv() {
         unbind(null);
         mNode = null;
         mParentFrame = null;
@@ -401,7 +415,7 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
      *
      * @param dest new frame instance to receive copy
      */
-    void copyInto(CursorFrame dest) {
+    final void copyInto(CursorFrame dest) {
         Node node = acquireShared();
         CursorFrame parent = mParentFrame;
 
@@ -440,7 +454,14 @@ final class CursorFrame extends AtomicReference<CursorFrame> {
     }
 
     @Override
-    public String toString() {
-        return getClass().getName() + '@' + Integer.toHexString(hashCode());
+    public final String toString() {
+        return Utils.toMiniString(this);
+    }
+
+    /**
+     * Special frame type for tracking ghosted entries within leaf nodes. Unlike regular
+     * frames, ghost frames don't prevent the bound node from being evicted.
+     */
+    final static class Ghost extends CursorFrame {
     }
 }

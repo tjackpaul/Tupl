@@ -1,17 +1,18 @@
 /*
- *  Copyright 2012-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -28,9 +29,9 @@ import org.cojen.tupl.io.*;
  * @author Brian S O'Neill
  */
 @org.junit.Ignore
-class TestUtils {
-    private static final Map<Database, File> cTempDatabases = new WeakHashMap<Database, File>();
-    private static final Set<File> cTempBaseFiles = new HashSet<File>();
+public class TestUtils {
+    private static final Map<Class, TempFiles> cTempFiles = new HashMap<>();
+
     private static long cTempId;
     private static File cBaseDir;
     private static volatile File cDeleteTempDir;
@@ -55,7 +56,7 @@ class TestUtils {
         });
     }
 
-    static void fastAssertArrayEquals(byte[] expected, byte[] actual) {
+    public static void fastAssertArrayEquals(byte[] expected, byte[] actual) {
         if (!Arrays.equals(expected, actual)) {
             org.junit.Assert.assertArrayEquals(expected, actual);
         }
@@ -63,170 +64,90 @@ class TestUtils {
 
     static enum OpenMode {NORMAL, DIRECT, DIRECT_MAPPED};
 
-    static Database newTempDatabase() throws IOException {
-        return newTempDatabase(-1, OpenMode.NORMAL);
+    public static Database newTempDatabase(Class context) throws IOException {
+        return newTempDatabase(context, -1, OpenMode.NORMAL);
     }
 
-    static Database newTempDatabase(OpenMode mode) throws IOException {
-        return newTempDatabase(-1, mode);
+    public static Database newTempDatabase(Class context, OpenMode mode) throws IOException {
+        return newTempDatabase(context, -1, mode);
     }
 
-    static Database newTempDatabase(long cacheSize) throws IOException {
-        return newTempDatabase(cacheSize, OpenMode.NORMAL);
+    public static Database newTempDatabase(Class context, long cacheSize) throws IOException {
+        return newTempDatabase(context, cacheSize, OpenMode.NORMAL);
     }
 
-    static Database newTempDatabase(long cacheSize, OpenMode mode) throws IOException {
-        return newTempDatabase(cacheSize, mode, -1);
-    }
-
-    static Database newTempDatabase(long cacheSize, OpenMode mode, int checkpointRateMillis)
+    public static Database newTempDatabase(Class context, long cacheSize, OpenMode mode)
         throws IOException
     {
-        DatabaseConfig config = new DatabaseConfig();
-        if (cacheSize >= 0) {
-            config.minCacheSize(cacheSize);
-        }
-        config.durabilityMode(DurabilityMode.NO_FLUSH);
-        config.directPageAccess(false);
-
-        if (checkpointRateMillis >= 0) {
-            config.checkpointRate(checkpointRateMillis, TimeUnit.MILLISECONDS);
-        }
-
-        switch (mode) {
-        default:
-            throw new IllegalArgumentException();
-        case NORMAL:
-            config.directPageAccess(false);
-            break;
-        case DIRECT:
-            config.directPageAccess(true);
-            break;
-        case DIRECT_MAPPED:
-            int pageSize = config.mPageSize;
-            if (pageSize == 0) {
-                pageSize = 4096;
-            }
-            if (cacheSize < 0) {
-                cacheSize = pageSize * 1000;
-            }
-            File baseFile = newTempBaseFile();
-            config.baseFile(baseFile);
-            File dbFile = new File(baseFile.getParentFile(), baseFile.getName() + ".db");
-            MappedPageArray pa = MappedPageArray.open
-                (pageSize, (cacheSize + pageSize - 1) / pageSize, dbFile,
-                 EnumSet.of(OpenOption.CREATE, OpenOption.MAPPED));
-            config.dataPageArray(pa);
-            config.directPageAccess(true);
-            Database db = Database.open(config);
-            synchronized (cTempDatabases) {
-                cTempDatabases.put(db, baseFile);
-            }
-            return db;
-        }
-
-        return newTempDatabase(config);
+        return newTempDatabase(context, cacheSize, mode, -1);
     }
 
-    static Database newTempDatabase(DatabaseConfig config) throws IOException {
-        File baseFile = newTempBaseFile();
-        Database db = Database.open(config.baseFile(baseFile));
-        synchronized (cTempDatabases) {
-            cTempDatabases.put(db, baseFile);
-        }
-        return db;
-    }
-
-    static File baseFileForTempDatabase(Database db) {
-        synchronized (cTempDatabases) {
-            return cTempDatabases.get(db);
-        }
-    }
-
-    static Database reopenTempDatabase(Database db, DatabaseConfig config) throws IOException {
-        return reopenTempDatabase(db, config, false);
-    }
-
-    static Database reopenTempDatabase(Database db, DatabaseConfig config, boolean deleteRedo)
+    public static Database newTempDatabase(Class context, long cacheSize, OpenMode mode,
+                                           int checkpointRateMillis)
         throws IOException
     {
-        File baseFile;
-        synchronized (cTempDatabases) {
-            baseFile = cTempDatabases.remove(db);
-        }
-        if (baseFile == null) {
-            throw new IllegalArgumentException();
-        }
-        db.close();
-
-        if (deleteRedo) {
-            for (File f : baseFile.getParentFile().listFiles()) {
-                if (f.getName().indexOf(".redo.") > 0) {
-                    f.delete();
-                }
-            }
-        }
-
-        db = Database.open(config.baseFile(baseFile));
-        synchronized (cTempDatabases) {
-            cTempDatabases.put(db, baseFile);
-        }
-        return db;
+        return tempFilesFor(context).newTempDatabase(cacheSize, mode, checkpointRateMillis);
     }
 
-    static File newTempBaseFile() throws IOException {
-        synchronized (cTempBaseFiles) {
-            if (cBaseDir == null) {
-                cBaseDir = new File(System.getProperty("java.io.tmpdir"), "tupl");
-                cDeleteTempDir = cBaseDir.exists() ? null : cBaseDir;
-                cBaseDir.mkdirs();
-            }
-            File baseFile = new File
-                (cBaseDir, "test-" + System.currentTimeMillis() + "-" + (++cTempId));
-            cTempBaseFiles.add(baseFile);
-            return baseFile;
-        }
+    public static Database newTempDatabase(Class context, DatabaseConfig config)
+        throws IOException
+    {
+        return tempFilesFor(context).newTempDatabase(config);
     }
 
-    static void deleteTempDatabase(Database db) {
-        if (db == null) {
-            return;
-        }
+    public static File baseFileForTempDatabase(Class context, Database db) {
+        return tempFilesFor(context).baseFileForTempDatabase(db);
+    }
 
-        try {
-            db.close();
-        } catch (IOException e) {
-        }
+    public static Database reopenTempDatabase(Class context, Database db, DatabaseConfig config)
+        throws IOException
+    {
+        return reopenTempDatabase(context, db, config, false);
+    }
 
-        File baseFile;
-        synchronized (cTempDatabases) {
-            baseFile = cTempDatabases.remove(db);
-        }
+    public static Database reopenTempDatabase(Class context, Database db,
+                                              DatabaseConfig config, boolean deleteRedo)
+        throws IOException
+    {
+        return tempFilesFor(context).reopenTempDatabase(db, config, deleteRedo);
+    }
 
-        if (baseFile != null) {
-            deleteDbFiles(baseFile);
+    public static File newTempBaseFile(Class context) throws IOException {
+        return tempFilesFor(context).newTempBaseFile();
+    }
+
+    public static void deleteTempDatabase(Class context, Database db) {
+        tempFilesFor(context).deleteTempDatabase(db);
+    }
+
+    public static void deleteTempDatabases(Class context) {
+        TempFiles files = removeTempFilesFor(context);
+        if (files != null) {
+            files.deleteTempDatabases();
         }
     }
 
-    static void deleteTempDatabases() {
-        synchronized (cTempDatabases) {
-            for (Database db : cTempDatabases.keySet()) {
-                try {
-                    db.close();
-                } catch (IOException e) {
-                }
-            }
-        }
-
-        synchronized (cTempBaseFiles) {
-            for (File baseFile : cTempBaseFiles) {
-                deleteDbFiles(baseFile);
-            }
-            cTempBaseFiles.clear();
+    public static void deleteTempFiles(Class context) {
+        TempFiles files = removeTempFilesFor(context);
+        if (files != null) {
+            files.deleteTempFiles();
         }
     }
 
-    static void deleteRecursively(File file) {
+    private static synchronized TempFiles tempFilesFor(Class context) {
+        TempFiles files = cTempFiles.get(context);
+        if (files == null) {
+            files = new TempFiles(context.getSimpleName());
+            cTempFiles.put(context, files);
+        }
+        return files;
+    }
+
+    private static synchronized TempFiles removeTempFilesFor(Class context) {
+        return cTempFiles.remove(context);
+    }
+
+    public static void deleteRecursively(File file) {
         if (file.isDirectory()) {
             File[] dirs = file.listFiles();
             if (dirs != null) {
@@ -257,15 +178,15 @@ class TestUtils {
         f.delete();
     }
 
-    static byte[] randomStr(Random rnd, int size) {
+    public static byte[] randomStr(Random rnd, int size) {
         return randomStr(rnd, null, size, size);
     }
 
-    static byte[] randomStr(Random rnd, int min, int max) {
+    public static byte[] randomStr(Random rnd, int min, int max) {
         return randomStr(rnd, null, min, max);
     }
 
-    static byte[] randomStr(Random rnd, byte[] prefix, int min, int max) {
+    public static byte[] randomStr(Random rnd, byte[] prefix, int min, int max) {
         int size;
         if (min == max) {
             size = max;
@@ -292,21 +213,42 @@ class TestUtils {
         return str;
     }
 
-    static void sleep(int millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
+    public static void sleep(long millis) {
+        if (millis <= 0) {
+            if (millis < 0) {
+                throw new IllegalArgumentException("" + millis);
+            }
+            return;
+        }
+
+        long end = System.currentTimeMillis() + millis;
+        do {
+            try {
+                Thread.sleep(millis);
+            } catch (InterruptedException e) {
+            }
+        } while ((millis = end - System.currentTimeMillis()) > 0);
+    }
+
+    public static <T extends Thread> T startAndWaitUntilBlocked(T t) {
+        t.start();
+        while (true) {
+            Thread.State state = t.getState();
+            if (state != Thread.State.NEW && state != Thread.State.RUNNABLE) {
+                return t;
+            }
+            Thread.yield();
         }
     }
 
-    static boolean is64bit() {
+    public static boolean is64bit() {
         return "amd64".equals(System.getProperty("os.arch"))
             || "64".equals(System.getProperty("sun.arch.data.model"));
     }
 
     private static volatile Object cForceGcRef;
 
-    static void forceGc() {
+    public static void forceGc() {
         for (int x=0; x<10; x++) {
             System.gc();
         }
@@ -323,7 +265,7 @@ class TestUtils {
 
     private static File cSourceDir;
 
-    static synchronized File findSourceDirectory() throws IOException {
+    public static synchronized File findSourceDirectory() throws IOException {
         if (cSourceDir != null) {
             return cSourceDir;
         }
@@ -345,7 +287,7 @@ class TestUtils {
         return null;
     }
 
-    static File findSourceDirectory(Set<File> visited, File dir, int matchDepth) {
+    public static File findSourceDirectory(Set<File> visited, File dir, int matchDepth) {
         if (!visited.add(dir)) {
             return null;
         }
@@ -400,5 +342,173 @@ class TestUtils {
         }
 
         return null;
+    }
+
+    private static synchronized File createTempBaseFile(String prefix) throws IOException {
+        if (cBaseDir == null) {
+            cBaseDir = new File(System.getProperty("java.io.tmpdir"), "tupl");
+            cDeleteTempDir = cBaseDir.exists() ? null : cBaseDir;
+            cBaseDir.mkdirs();
+        }
+        return new File(cBaseDir, prefix + "-" + System.currentTimeMillis() + "-" + (++cTempId));
+    }
+
+    static class TempFiles {
+        private final Map<Database, File> mTempDatabases = new WeakHashMap<>();
+        private final Set<File> mTempBaseFiles = new HashSet<>();
+
+        private final String mPrefix;
+
+        TempFiles(String prefix) {
+            mPrefix = prefix;
+        }
+
+        Database newTempDatabase(long cacheSize, OpenMode mode, int checkpointRateMillis)
+            throws IOException
+        {
+            DatabaseConfig config = new DatabaseConfig();
+            if (cacheSize >= 0) {
+                config.minCacheSize(cacheSize);
+            }
+            config.durabilityMode(DurabilityMode.NO_FLUSH);
+            config.directPageAccess(false);
+
+            if (checkpointRateMillis >= 0) {
+                config.checkpointRate(checkpointRateMillis, TimeUnit.MILLISECONDS);
+            }
+
+            switch (mode) {
+            default:
+                throw new IllegalArgumentException();
+            case NORMAL:
+                config.directPageAccess(false);
+                break;
+            case DIRECT:
+                config.directPageAccess(true);
+                break;
+            case DIRECT_MAPPED:
+                int pageSize = config.mPageSize;
+                if (pageSize == 0) {
+                    pageSize = 4096;
+                }
+                if (cacheSize < 0) {
+                    cacheSize = pageSize * 1000;
+                }
+                File baseFile = newTempBaseFile();
+                config.baseFile(baseFile);
+                File dbFile = new File(baseFile.getParentFile(), baseFile.getName() + ".db");
+                MappedPageArray pa = MappedPageArray.open
+                    (pageSize, (cacheSize + pageSize - 1) / pageSize, dbFile,
+                     EnumSet.of(OpenOption.CREATE, OpenOption.MAPPED));
+                config.dataPageArray(pa);
+                config.directPageAccess(true);
+                Database db = Database.open(config);
+                synchronized (this) {
+                    mTempDatabases.put(db, baseFile);
+                }
+                return db;
+            }
+
+            return newTempDatabase(config);
+        }
+
+        Database newTempDatabase(DatabaseConfig config) throws IOException {
+            File baseFile = newTempBaseFile();
+            Database db = Database.open(config.baseFile(baseFile));
+            synchronized (this) {
+                mTempDatabases.put(db, baseFile);
+            }
+            return db;
+        }
+
+        synchronized File baseFileForTempDatabase(Database db) {
+            return mTempDatabases.get(db);
+        }
+
+        Database reopenTempDatabase(Database db, DatabaseConfig config, boolean deleteRedo)
+            throws IOException
+        {
+            File baseFile;
+            synchronized (this) {
+                baseFile = mTempDatabases.remove(db);
+            }
+            if (baseFile == null) {
+                throw new IllegalArgumentException();
+            }
+            db.close();
+
+            if (deleteRedo) {
+                String baseName = baseFile.getName();
+                for (File f : baseFile.getParentFile().listFiles()) {
+                    String name = f.getName();
+                    if (name.startsWith(baseName) && name.indexOf(".redo.") > 0) {
+                        f.delete();
+                    }
+                }
+            }
+
+            db = Database.open(config.baseFile(baseFile));
+            synchronized (this) {
+                mTempDatabases.put(db, baseFile);
+            }
+            return db;
+        }
+
+        synchronized File newTempBaseFile() throws IOException {
+            File baseFile = TestUtils.createTempBaseFile(mPrefix);
+            mTempBaseFiles.add(baseFile);
+            return baseFile;
+        }
+
+        void deleteTempDatabase(Database db) {
+            if (db == null) {
+                return;
+            }
+
+            try {
+                db.close();
+            } catch (IOException e) {
+            }
+
+            File baseFile;
+            synchronized (this) {
+                baseFile = mTempDatabases.remove(db);
+                mTempBaseFiles.remove(baseFile);
+            }
+            
+            if (baseFile != null) {
+                deleteDbFiles(baseFile);
+            }
+        }
+
+        synchronized void deleteTempDatabases() {
+            for (Database db : mTempDatabases.keySet()) {
+                try {
+                    db.close();
+                } catch (IOException e) {
+                }
+            }
+
+            for (File baseFile : mTempBaseFiles) {
+                deleteDbFiles(baseFile);
+            }
+
+            mTempDatabases.clear();
+            mTempBaseFiles.clear();
+        }
+
+        synchronized void deleteTempFiles() {
+            for (File baseFile : mTempBaseFiles) {
+                String prefix = baseFile.getName();
+                baseFile.getParentFile().listFiles(file -> {
+                    if (file.getName().startsWith(prefix)) {
+                        file.delete();
+                    }
+                    return false;
+                });
+            }
+
+            mTempBaseFiles.clear();
+        }
     }
 }

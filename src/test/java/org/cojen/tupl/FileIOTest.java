@@ -1,17 +1,18 @@
 /*
- *  Copyright 2012-2016 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -27,6 +28,7 @@ import java.nio.file.Files;
 import java.util.EnumSet;
 
 import org.cojen.tupl.io.FileIO;
+import org.cojen.tupl.io.LengthOption;
 import org.cojen.tupl.io.OpenOption;
 import org.junit.*;
 
@@ -41,7 +43,7 @@ public class FileIOTest {
 
     @Before
     public void setup() throws Exception {
-        file = newTempBaseFile();
+        file = newTempBaseFile(getClass());
     }
 
     @After
@@ -51,10 +53,14 @@ public class FileIOTest {
         }
     }
 
+    // Newer versions of Linux allocate as much as possible instead of failing atomically. The
+    // FileIO class reverts the allocation, but until it finishes, other threads and processes
+    // writing to the temp directory fail with "No space left on device".
+    @Ignore
     @Test
     public void preallocateTooLarge() throws Exception {
         assumeTrue(Platform.isLinux()); 
-        FileIO fio = FileIO.open(file, EnumSet.of(OpenOption.CREATE, OpenOption.MAPPED, OpenOption.PREALLOCATE));
+        FileIO fio = FileIO.open(file, EnumSet.of(OpenOption.CREATE, OpenOption.MAPPED));
 
         FileStore fs = Files.getFileStore(file.toPath());
         assumeTrue("ext4".equals(fs.type()) && !fs.name().contains("docker"));
@@ -62,7 +68,7 @@ public class FileIOTest {
         long len = file.getTotalSpace() * 100L; 
         // setLength traps the IOException and prevents resizing / remapping. Not remapping avoids
         // the SIGBUS issue.
-        fio.setLength(len);
+        fio.setLength(len, LengthOption.PREALLOCATE_ALWAYS);
         assertEquals(0, fio.length());
 
         fio.close();
@@ -70,13 +76,13 @@ public class FileIOTest {
 
     @Test
     public void preallocateGrowShrink() throws Exception {
-        FileIO fio = FileIO.open(file, EnumSet.of(OpenOption.CREATE, OpenOption.PREALLOCATE));
+        FileIO fio = FileIO.open(file, EnumSet.of(OpenOption.CREATE));
         for (long len = 0; len <= 50_000L; len += 5000L) {
-            fio.setLength(len);
+            fio.setLength(len, LengthOption.PREALLOCATE_ALWAYS);
             assertEquals(len, fio.length());
         }
         for (long len = 50_000L; len >= 0; len -= 5000L) {
-            fio.setLength(len);
+            fio.setLength(len, LengthOption.PREALLOCATE_ALWAYS);
             assertEquals(len, fio.length());
         }
 
@@ -85,19 +91,29 @@ public class FileIOTest {
 
     @Test
     public void preallocate() throws Exception {
+        try {
+            doPreallocate();
+        } catch (AssertionError e) {
+            // Try again in case any external files messed up the test.
+            teardown();
+            setup();
+            doPreallocate();
+        }
+    }
+
+    private void doPreallocate() throws Exception {
         // Assuming a filesystem with delayed block allocation,
         // e.g. ext3 / ext4 on Linux.
         assumeTrue(Platform.isLinux() || Platform.isMac());
 
         long len = 100L * (1<<20); // 100 MB
-        FileIO fio = FileIO.open(file, EnumSet.of(OpenOption.CREATE, OpenOption.PREALLOCATE));
+        FileIO fio = FileIO.open(file, EnumSet.of(OpenOption.CREATE));
         long startFree = file.getFreeSpace();
 
-        fio.setLength(len);
+        fio.setLength(len, LengthOption.PREALLOCATE_ALWAYS);
         long alloc = startFree - file.getFreeSpace();
                         
-        // Free space should be reduced. Pad expectation since external
-        // events may interfere.
+        // Free space should be reduced. Pad expectation since external events may interfere.
         assertTrue(alloc > (len >> 1));
 
         fio.close();
@@ -119,9 +135,9 @@ public class FileIOTest {
         File f = new File("root/test.file");
         if (f.exists()) f.delete();
 
-        FileIO fio = FileIO.open(f, EnumSet.of(OpenOption.CREATE, OpenOption.PREALLOCATE));
+        FileIO fio = FileIO.open(f, EnumSet.of(OpenOption.CREATE));
         final long len = f.getTotalSpace() * 5L;
-        fio.setLength(len);
+        fio.setLength(len, LengthOption.PREALLOCATE_ALWAYS);
         fio.map();
 
         ByteBuffer bb = ByteBuffer.allocateDirect(4097);
