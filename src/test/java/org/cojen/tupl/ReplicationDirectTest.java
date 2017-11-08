@@ -1,5 +1,5 @@
 /*
- *  Copyright (C) 2011-2017 Cojen.org
+ *  Copyright (C) 2017 Cojen.org
  *
  *  This program is free software: you can redistribute it and/or modify
  *  it under the terms of the GNU Affero General Public License as
@@ -17,23 +17,18 @@
 
 package org.cojen.tupl;
 
-import java.io.IOException;
-
 /**
  * 
  *
  * @author Brian S O'Neill
  */
-final class TrimmedStream extends WrappedStream {
-    private final TrimmedView mView;
-
-    TrimmedStream(TrimmedView view, Stream source) {
-        super(source);
-        mView = view;
+public class ReplicationDirectTest extends ReplicationTest {
+    public static void main(String[] args) throws Exception {
+        org.junit.runner.JUnitCore.main(ReplicationDirectTest.class.getName());
     }
 
-    @Override
-    public LockResult open(Transaction txn, byte[] key) throws IOException {
-        return mSource.open(txn, mView.applyPrefix(key));
+    protected DatabaseConfig decorate(DatabaseConfig config) throws Exception {
+        config.directPageAccess(true);
+        return config;
     }
 }
