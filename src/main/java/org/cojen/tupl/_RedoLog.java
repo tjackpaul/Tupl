@@ -309,7 +309,8 @@ final class _RedoLog extends _RedoWriter {
      * @return null if non-durable
      */
     private static File fileFor(File base, long logId) {
-        return base == null ? null : new File(base.getPath() + ".redo." + logId);
+        return base == null ? null : new File
+            (base.getPath() + _LocalDatabase.REDO_FILE_SUFFIX + logId);
     }
 
     @Override
@@ -444,7 +445,9 @@ final class _RedoLog extends _RedoWriter {
     }
 
     @Override
-    long write(boolean commit, byte[] bytes, int offset, int length) throws IOException {
+    long write(boolean flush, byte[] bytes, int offset, int length, int commitLen)
+        throws IOException
+    {
         try {
             byte[] buf = mBuffer;
             int avail = buf.length - mBufferPos;
@@ -455,7 +458,7 @@ final class _RedoLog extends _RedoWriter {
                 } else {
                     System.arraycopy(bytes, offset, buf, mBufferPos, length);
                     mBufferPos += length;
-                    if (mBufferPos == buf.length || commit || mAlwaysFlush) {
+                    if (mBufferPos == buf.length || flush || mAlwaysFlush) {
                         mOut.write(buf, 0, mBufferPos);
                         mBufferPos = 0;
                     }
@@ -467,7 +470,7 @@ final class _RedoLog extends _RedoWriter {
                 mOut.write(buf, 0, mBufferPos);
                 offset += avail;
                 length -= avail;
-                if (length >= buf.length || commit || mAlwaysFlush) {
+                if (length >= buf.length || flush || mAlwaysFlush) {
                     mBufferPos = 0;
                     mOut.write(bytes, offset, length);
                 } else {

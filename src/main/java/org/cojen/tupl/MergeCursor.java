@@ -27,7 +27,7 @@ import java.util.Comparator;
  *
  * @author Brian S O'Neill
  */
-abstract class MergeCursor implements Cursor {
+abstract class MergeCursor extends AbstractValueAccessor implements Cursor {
     // Actual values are important for xor, as used by the select method, to work properly.
     static final int DIRECTION_FORWARD = 0, DIRECTION_REVERSE = -1;
 
@@ -103,6 +103,17 @@ abstract class MergeCursor implements Cursor {
     public int compareKeyTo(byte[] rkey, int offset, int length) {
         return mKey == mFirst.key() ? mFirst.compareKeyTo(rkey, offset, length)
             : mSecond.compareKeyTo(rkey, offset, length);
+    }
+
+    @Override
+    public boolean register() throws IOException {
+        return mFirst.register() || mSecond.register();
+    }
+
+    @Override
+    public void unregister() {
+        mFirst.unregister();
+        mSecond.unregister();
     }
 
     @FunctionalInterface
@@ -527,6 +538,46 @@ abstract class MergeCursor implements Cursor {
 
         mFirst.reset();
         mSecond.reset();
+    }
+
+    @Override
+    public void close() {
+        reset();
+    }
+
+    @Override
+    public long valueLength() throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void setValueLength(long length) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    int doValueRead(long pos, byte[] buf, int off, int len) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    void doValueWrite(long pos, byte[] buf, int off, int len) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    void doValueClear(long pos, long length) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    int valueStreamBufferSize(int bufferSize) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    void valueCheckOpen() {
+        throw new UnsupportedOperationException();
     }
 
     /**

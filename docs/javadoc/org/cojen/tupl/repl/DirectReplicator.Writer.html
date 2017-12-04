@@ -18,7 +18,7 @@
     catch(err) {
     }
 //-->
-var methods = {"i0":6,"i1":18,"i2":6,"i3":18};
+var methods = {"i0":6,"i1":6,"i2":18,"i3":6,"i4":18};
 var tabs = {65535:["t0","All Methods"],2:["t2","Instance Methods"],4:["t3","Abstract Methods"],16:["t5","Default Methods"]};
 var altColor = "altColor";
 var rowColor = "rowColor";
@@ -100,7 +100,7 @@ var activeTableTab = "activeTableTab";
 <li class="blockList">
 <dl>
 <dt>All Superinterfaces:</dt>
-<dd><a href="http://docs.oracle.com/javase/8/docs/api/java/lang/AutoCloseable.html?is-external=true" title="class or interface in java.lang">AutoCloseable</a>, <a href="http://docs.oracle.com/javase/8/docs/api/java/io/Closeable.html?is-external=true" title="class or interface in java.io">Closeable</a>, <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html" title="interface in org.cojen.tupl.repl">DirectReplicator.Accessor</a></dd>
+<dd><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/AutoCloseable.html?is-external=true" title="class or interface in java.lang">AutoCloseable</a>, <a href="https://docs.oracle.com/javase/9/docs/api/java/io/Closeable.html?is-external=true" title="class or interface in java.io">Closeable</a>, <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html" title="interface in org.cojen.tupl.repl">DirectReplicator.Accessor</a></dd>
 </dl>
 <dl>
 <dt>All Known Subinterfaces:</dt>
@@ -134,26 +134,32 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <th class="colLast" scope="col">Method and Description</th>
 </tr>
 <tr id="i0" class="altColor">
-<td class="colFirst"><code>void</code></td>
-<td class="colLast"><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/repl/DirectReplicator.Writer.html#uponCommit-long-java.util.function.LongConsumer-">uponCommit</a></span>(long&nbsp;index,
-          <a href="http://docs.oracle.com/javase/8/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</code>
-<div class="block">Invokes the given task when the commit index reaches the requested index.</div>
+<td class="colFirst"><code>long</code></td>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/repl/DirectReplicator.Writer.html#commitIndex--">commitIndex</a></span>()</code>
+<div class="block">Returns the current term commit index, which might be lower than the start index.</div>
 </td>
 </tr>
 <tr id="i1" class="rowColor">
-<td class="colFirst"><code>default void</code></td>
-<td class="colLast"><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/repl/DirectReplicator.Writer.html#uponEndCommit-java.util.function.LongConsumer-">uponEndCommit</a></span>(<a href="http://docs.oracle.com/javase/8/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</code>
-<div class="block">Invokes the given task when the commit index reaches the end of the term.</div>
+<td class="colFirst"><code>void</code></td>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/repl/DirectReplicator.Writer.html#uponCommit-long-java.util.function.LongConsumer-">uponCommit</a></span>(long&nbsp;index,
+          <a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</code>
+<div class="block">Invokes the given task when the commit index reaches the requested index.</div>
 </td>
 </tr>
 <tr id="i2" class="altColor">
+<td class="colFirst"><code>default void</code></td>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/repl/DirectReplicator.Writer.html#uponEndCommit-java.util.function.LongConsumer-">uponEndCommit</a></span>(<a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</code>
+<div class="block">Invokes the given task when the commit index reaches the end of the term.</div>
+</td>
+</tr>
+<tr id="i3" class="rowColor">
 <td class="colFirst"><code>long</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/repl/DirectReplicator.Writer.html#waitForCommit-long-long-">waitForCommit</a></span>(long&nbsp;index,
              long&nbsp;nanosTimeout)</code>
 <div class="block">Blocks until the commit index reaches the given index.</div>
 </td>
 </tr>
-<tr id="i3" class="rowColor">
+<tr id="i4" class="altColor">
 <td class="colFirst"><code>default long</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/repl/DirectReplicator.Writer.html#waitForEndCommit-long-">waitForEndCommit</a></span>(long&nbsp;nanosTimeout)</code>
 <div class="block">Blocks until the commit index reaches the end of the term.</div>
@@ -181,6 +187,16 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <!--   -->
 </a>
 <h3>Method Detail</h3>
+<a name="commitIndex--">
+<!--   -->
+</a>
+<ul class="blockList">
+<li class="blockList">
+<h4>commitIndex</h4>
+<pre>long&nbsp;commitIndex()</pre>
+<div class="block">Returns the current term commit index, which might be lower than the start index.</div>
+</li>
+</ul>
 <a name="waitForCommit-long-long-">
 <!--   -->
 </a>
@@ -189,7 +205,7 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <h4>waitForCommit</h4>
 <pre>long&nbsp;waitForCommit(long&nbsp;index,
                    long&nbsp;nanosTimeout)
-            throws <a href="http://docs.oracle.com/javase/8/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></pre>
+            throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></pre>
 <div class="block">Blocks until the commit index reaches the given index.</div>
 <dl>
 <dt><span class="paramLabel">Parameters:</span></dt>
@@ -198,7 +214,7 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <dd>current commit index, or -1 if deactivated before the index could be
  reached, or -2 if timed out</dd>
 <dt><span class="throwsLabel">Throws:</span></dt>
-<dd><code><a href="http://docs.oracle.com/javase/8/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></code></dd>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></code></dd>
 </dl>
 </li>
 </ul>
@@ -209,7 +225,7 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <li class="blockList">
 <h4>waitForEndCommit</h4>
 <pre>default&nbsp;long&nbsp;waitForEndCommit(long&nbsp;nanosTimeout)
-                       throws <a href="http://docs.oracle.com/javase/8/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></pre>
+                       throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></pre>
 <div class="block">Blocks until the commit index reaches the end of the term.</div>
 <dl>
 <dt><span class="paramLabel">Parameters:</span></dt>
@@ -218,7 +234,7 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <dd>current commit index, or -1 if closed before the index could be
  reached, or -2 if timed out</dd>
 <dt><span class="throwsLabel">Throws:</span></dt>
-<dd><code><a href="http://docs.oracle.com/javase/8/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></code></dd>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/InterruptedIOException.html?is-external=true" title="class or interface in java.io">InterruptedIOException</a></code></dd>
 </dl>
 </li>
 </ul>
@@ -229,7 +245,7 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <li class="blockList">
 <h4>uponCommit</h4>
 <pre>void&nbsp;uponCommit(long&nbsp;index,
-                <a href="http://docs.oracle.com/javase/8/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</pre>
+                <a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</pre>
 <div class="block">Invokes the given task when the commit index reaches the requested index. The
  current commit index is passed to the task, or -1 if the term ended before the index
  could be reached. If the task can be run when this method is called, then the
@@ -242,7 +258,7 @@ extends <a href="../../../../org/cojen/tupl/repl/DirectReplicator.Accessor.html"
 <ul class="blockListLast">
 <li class="blockList">
 <h4>uponEndCommit</h4>
-<pre>default&nbsp;void&nbsp;uponEndCommit(<a href="http://docs.oracle.com/javase/8/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</pre>
+<pre>default&nbsp;void&nbsp;uponEndCommit(<a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/LongConsumer.html?is-external=true" title="class or interface in java.util.function">LongConsumer</a>&nbsp;task)</pre>
 <div class="block">Invokes the given task when the commit index reaches the end of the term. The
  current commit index is passed to the task, or -1 if if closed. If the task can be
  run when this method is called, then the current thread invokes it immediately.</div>

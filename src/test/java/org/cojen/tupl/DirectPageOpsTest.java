@@ -38,7 +38,7 @@ public class DirectPageOpsTest {
         Object arena = DirectPageOps.p_arenaAlloc(4096, count);
 
         try {
-            long ptr = DirectPageOps.p_calloc(arena, 100);
+            long ptr = DirectPageOps.p_calloc(arena, 100, false);
             fail();
         } catch (IllegalArgumentException e) {
             // Wrong size.
@@ -46,7 +46,7 @@ public class DirectPageOpsTest {
 
         long last = 0;
         for (int i=0; i<count; i++) {
-            long ptr = DirectPageOps.p_calloc(arena, 4096);
+            long ptr = DirectPageOps.p_calloc(arena, 4096, false);
             assertTrue(DirectPageOps.inArena(ptr));
             if (i != 0) {
                 assertEquals(4096, ptr - last);
@@ -55,7 +55,7 @@ public class DirectPageOpsTest {
         }
 
         // Arena is depleted, and so the next allocation is outside the arena.
-        long ptr = DirectPageOps.p_calloc(arena, 4096);
+        long ptr = DirectPageOps.p_calloc(arena, 4096, false);
         assertFalse(DirectPageOps.inArena(ptr));
 
         DirectPageOps.p_delete(ptr);
@@ -116,7 +116,69 @@ public class DirectPageOpsTest {
 
     private void allocAll(Object arena, long[] pages, int size) {
         for (int i=0; i<pages.length; i++) {
-            pages[i] = DirectPageOps.p_calloc(arena, size);
+            pages[i] = DirectPageOps.p_calloc(arena, size, false);
         }
+    }
+
+    @Test
+    public void varInt() throws Exception {
+        long page = DirectPageOps.p_alloc(100, false);
+
+        // Pairs of value to encode and expected length.
+        int[] values = {
+            Integer.MIN_VALUE, 5,
+            -10, 5,
+            0, 1,
+            1, 1,
+            200, 2,
+            20000, 3,
+            12345678, 4,
+            1234567890, 5,
+            Integer.MAX_VALUE, 5,
+        };
+
+        for (int i=0; i<values.length; i+=2) {
+            int val = values[i];
+            int len = values[i + 1];
+            assertEquals(len, DirectPageOps.p_uintPutVar(page, 1, val) - 1);
+            assertEquals(val, DirectPageOps.p_uintGetVar(page, 1));
+        }
+
+        DirectPageOps.p_delete(page);
+    }
+
+    @Test
+    public void varLong() throws Exception {
+        long page = DirectPageOps.p_alloc(100, false);
+
+        // Pairs of value to encode and expected length.
+        long[] values = {
+            Long.MIN_VALUE, 9,
+            -10, 9,
+            0, 1,
+            1, 1,
+            200, 2,
+            20000, 3,
+            12345678, 4,
+            1234567890, 5,
+            1234567890123L, 6,
+            123456789012345L, 7,
+            12345678901234567L, 8,
+            1234567890123456780L, 9,
+            Long.MAX_VALUE, 9,
+        };
+
+        IntegerRef.Value ref = new IntegerRef.Value();
+
+        for (int i=0; i<values.length; i+=2) {
+            long val = values[i];
+            int len = (int) values[i + 1];
+            assertEquals(len, DirectPageOps.p_ulongPutVar(page, 1, val) - 1);
+            ref.set(1);
+            assertEquals(val, DirectPageOps.p_ulongGetVar(page, ref));
+            assertEquals(len, ref.get() - 1);
+        }
+
+        DirectPageOps.p_delete(page);
     }
 }

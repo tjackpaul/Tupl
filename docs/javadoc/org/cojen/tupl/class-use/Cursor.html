@@ -154,8 +154,37 @@
 </td>
 </tr>
 <tr class="rowColor">
+<td class="colFirst"><code>default <a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a></code></td>
+<td class="colLast"><span class="typeNameLabel">View.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/View.html#newAccessor-org.cojen.tupl.Transaction-byte:A-">newAccessor</a></span>(<a href="../../../../org/cojen/tupl/Transaction.html" title="interface in org.cojen.tupl">Transaction</a>&nbsp;txn,
+           byte[]&nbsp;key)</code>
+<div class="block">Returns a cursor intended for <a href="../../../../org/cojen/tupl/ValueAccessor.html" title="interface in org.cojen.tupl"><code>accessing</code></a> values in chunks,
+ permitting them to be larger than what can fit in main memory.</div>
+</td>
+</tr>
+<tr class="altColor">
 <td class="colFirst"><code><a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a></code></td>
 <td class="colLast"><span class="typeNameLabel">View.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/View.html#newCursor-org.cojen.tupl.Transaction-">newCursor</a></span>(<a href="../../../../org/cojen/tupl/Transaction.html" title="interface in org.cojen.tupl">Transaction</a>&nbsp;txn)</code>&nbsp;</td>
+</tr>
+</tbody>
+</table>
+<table class="useSummary" border="0" cellpadding="3" cellspacing="0" summary="Use table, listing methods, and an explanation">
+<caption><span>Methods in <a href="../../../../org/cojen/tupl/package-summary.html">org.cojen.tupl</a> with parameters of type <a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a></span><span class="tabEnd">&nbsp;</span></caption>
+<tr>
+<th class="colFirst" scope="col">Modifier and Type</th>
+<th class="colLast" scope="col">Method and Description</th>
+</tr>
+<tbody>
+<tr class="altColor">
+<td class="colFirst"><code>void</code></td>
+<td class="colLast"><span class="typeNameLabel">WrappedCursor.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/WrappedCursor.html#transferTo-org.cojen.tupl.Cursor-">transferTo</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;target)</code>
+<div class="block">Always throws UnmodifiableViewException by default.</div>
+</td>
+</tr>
+<tr class="rowColor">
+<td class="colFirst"><code>default void</code></td>
+<td class="colLast"><span class="typeNameLabel">Cursor.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/Cursor.html#transferTo-org.cojen.tupl.Cursor-">transferTo</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;target)</code>
+<div class="block">Transfers the current entry to another position, within this view or another view.</div>
+</td>
 </tr>
 </tbody>
 </table>

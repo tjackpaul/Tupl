@@ -64,6 +64,11 @@ final class _NonPageDb extends _PageDb {
     }
 
     @Override
+    public boolean isDirectIO() {
+        return false;
+    }
+
+    @Override
     public int allocMode() {
         return _NodeContext.MODE_NO_EVICT;
     }
@@ -168,14 +173,14 @@ final class _NonPageDb extends _PageDb {
     }
 
     @Override
-    public void deletePage(long id) throws IOException {
+    public void deletePage(long id, boolean force) throws IOException {
         uncachePage(id);
         mFreePageCount.increment();
     }
 
     @Override
     public void recyclePage(long id) throws IOException {
-        deletePage(id);
+        deletePage(id, true);
     }
 
     @Override

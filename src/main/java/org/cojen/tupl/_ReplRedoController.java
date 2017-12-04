@@ -85,10 +85,11 @@ final class _ReplRedoController extends _ReplRedoWriter {
     void checkpointSwitch(_TransactionContext[] contexts) throws IOException {
         mCheckpointNum++;
 
+        _ReplRedoWriter redo = mTxnRedoWriter;
+        mCheckpointRedoWriter = redo;
+
         // Only capture new checkpoint state if previous attempt succeeded.
         if (mCheckpointPos <= 0 && mCheckpointTxnId == 0) {
-            _ReplRedoWriter redo = mTxnRedoWriter;
-            mCheckpointRedoWriter = redo;
             ReplicationManager.Writer writer = redo.mReplWriter;
             if (writer == null) {
                 mCheckpointPos = mEngine.suspendedDecodePosition();
@@ -146,6 +147,11 @@ final class _ReplRedoController extends _ReplRedoWriter {
                 // earlier operations. Transactional operations are expected to be idempotent,
                 // but the transactions will roll back regardless.
 
+                // FIXME: If becomes a replica, and the confirmed just keeps going higher,
+                // isn't it possible that mCheckpointPos goes higher than is expected? Yes, see
+                // context.confirmed in the leaderNotify method. This requires a flip back to
+                // leader mode, however. Capture this state earlier to be safe?
+
                 long[] result = db.highestTransactionContext().copyConfirmed();
 
                 mCheckpointPos = result[0];
@@ -189,20 +195,12 @@ final class _ReplRedoController extends _ReplRedoWriter {
         if (metadata) {
             try {
                 long pos;
-                {
-                    _ReplRedoWriter redo = mTxnRedoWriter;
-                    ReplicationManager.Writer writer = redo.mReplWriter;
-
-                    if (writer == null) {
-                        pos = mEngine.decodePosition();
-                    } else {
-                        redo.acquireShared();
-                        pos = redo.mLastCommitPos;
-                        redo.releaseShared();
-                        writer.confirm(pos);
-                    }
+                ReplicationManager.Writer writer = mTxnRedoWriter.mReplWriter;
+                if (writer == null) {
+                    pos = mEngine.decodePosition();
+                } else {
+                    pos = writer.confirmedPosition();
                 }
-
                 mEngine.mManager.syncConfirm(pos);
                 return;
             } catch (IOException e) {

@@ -29,6 +29,10 @@ import java.net.UnknownHostException;
 import java.util.HashSet;
 import java.util.Set;
 
+import java.util.function.BiConsumer;
+
+import java.util.logging.Level;
+
 import org.cojen.tupl.io.Utils;
 
 /**
@@ -50,6 +54,7 @@ public class ReplicatorConfig implements Cloneable, Serializable {
     ServerSocket mLocalSocket;
     Role mLocalRole;
     Set<SocketAddress> mSeeds;
+    transient BiConsumer<Level, String> mEventListener;
 
     public ReplicatorConfig() {
         createFilePath(true);
@@ -115,7 +120,7 @@ public class ReplicatorConfig implements Cloneable, Serializable {
         if (port <= 0) {
             throw new IllegalArgumentException();
         }
-        mLocalAddress = new InetSocketAddress(InetAddress.getLocalHost(), port);
+        mLocalAddress = new InetSocketAddress(LocalHost.getLocalHost(), port);
         mListenAddress = new InetSocketAddress(port);
         return this;
     }
@@ -163,7 +168,7 @@ public class ReplicatorConfig implements Cloneable, Serializable {
             InetAddress addr = sockAddr.getAddress();
             if (addr.isAnyLocalAddress()) {
                 mLocalAddress = new InetSocketAddress
-                    (InetAddress.getLocalHost(), sockAddr.getPort());
+                    (LocalHost.getLocalHost(), sockAddr.getPort());
             }
         }
 
@@ -192,6 +197,35 @@ public class ReplicatorConfig implements Cloneable, Serializable {
      * replicator for the first time without any seeds indicates that a new replication group
      * is to be formed. If the local member is already in a group, the seeds are ignored.
      *
+     * @throws IllegalArgumentException if addressString is null or malformed
+     */
+    public ReplicatorConfig addSeed(String addressString) throws UnknownHostException {
+        if (addressString == null) {
+            throw new IllegalArgumentException();
+        }
+        SocketAddress addr = GroupFile.parseSocketAddress(addressString);
+        if (addr == null) {
+            throw new IllegalArgumentException("Malformed address: " + addressString);
+        }
+        return addSeed(addr);
+    }
+
+    /**
+     * Add a remote member address for allowing the local member to join the group. Opening a
+     * replicator for the first time without any seeds indicates that a new replication group
+     * is to be formed. If the local member is already in a group, the seeds are ignored.
+     *
+     * @throws IllegalArgumentException if hostname is null
+     */
+    public ReplicatorConfig addSeed(String hostname, int port) {
+        return addSeed(new InetSocketAddress(hostname, port));
+    }
+
+    /**
+     * Add a remote member address for allowing the local member to join the group. Opening a
+     * replicator for the first time without any seeds indicates that a new replication group
+     * is to be formed. If the local member is already in a group, the seeds are ignored.
+     *
      * @throws IllegalArgumentException if address is null
      */
     public ReplicatorConfig addSeed(SocketAddress addr) {
@@ -202,6 +236,14 @@ public class ReplicatorConfig implements Cloneable, Serializable {
             mSeeds = new HashSet<>();
         }
         mSeeds.add(addr);
+        return this;
+    }
+
+    /**
+     * Set a listener which receives notifications of actions being performed by the replicator.
+     */
+    public ReplicatorConfig eventListener(BiConsumer<Level, String> listener) {
+        mEventListener = listener;
         return this;
     }
 

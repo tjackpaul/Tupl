@@ -208,7 +208,7 @@ final class _DurablePageDb extends _PageDb {
                 mCommitNumber = -1;
 
                 // Commit twice to ensure both headers have valid data.
-                long header = p_calloc(pageSize);
+                long header = p_calloc(pageSize, isDirectIO());
                 try {
                     mCommitLock.acquireExclusive();
                     try {
@@ -340,6 +340,11 @@ final class _DurablePageDb extends _PageDb {
     }
 
     @Override
+    public boolean isDirectIO() {
+        return mPageArray.isDirectIO();
+    }
+
+    @Override
     public int allocMode() {
         return 0;
     }
@@ -442,11 +447,11 @@ final class _DurablePageDb extends _PageDb {
     }
 
     @Override
-    public void deletePage(long id) throws IOException {
+    public void deletePage(long id, boolean force) throws IOException {
         checkId(id);
         CommitLock.Shared shared = mCommitLock.acquireShared();
         try {
-            mPageManager.deletePage(id);
+            mPageManager.deletePage(id, force);
         } catch (IOException e) {
             throw e;
         } catch (Throwable e) {
@@ -465,10 +470,8 @@ final class _DurablePageDb extends _PageDb {
             try {
                 mPageManager.recyclePage(id);
             } catch (IOException e) {
-                mPageManager.deletePage(id);
+                mPageManager.deletePage(id, true);
             }
-        } catch (IOException e) {
-            throw e;
         } catch (Throwable e) {
             throw closeOnFailure(e);
         } finally {
@@ -691,7 +694,7 @@ final class _DurablePageDb extends _PageDb {
         mHeaderLatch.acquireShared();
         try {
             long pageCount, redoPos;
-            long header = p_alloc(MINIMUM_PAGE_SIZE);
+            long header = p_alloc(MINIMUM_PAGE_SIZE, isDirectIO());
             try {
                 mPageArray.readPage(mCommitNumber & 1, header, 0, MINIMUM_PAGE_SIZE);
                 pageCount = _PageManager.readTotalPageCount(header, I_MANAGER_HEADER);
@@ -823,7 +826,7 @@ final class _DurablePageDb extends _PageDb {
             }
         }
 
-        long bufferPage = p_transfer(buffer);
+        long bufferPage = p_transfer(buffer, pa.isDirectIO());
 
         try {
             // Write header and ensure that the incomplete restore state is persisted.
@@ -940,7 +943,7 @@ final class _DurablePageDb extends _PageDb {
     }
 
     private long readHeader(int id) throws IOException {
-        long header = p_alloc(MINIMUM_PAGE_SIZE);
+        long header = p_alloc(MINIMUM_PAGE_SIZE, isDirectIO());
 
         try {
             try {
@@ -969,9 +972,19 @@ final class _DurablePageDb extends _PageDb {
     private void readPartial(long index, int start, byte[] buf, int offset, int length)
         throws IOException
     {
-        long page = p_alloc(start + length);
+        long page;
+        int readLen;
+
+        if (isDirectIO()) {
+            readLen = pageSize();
+            page = p_alloc(readLen, true);
+        } else {
+            readLen = start + length;
+            page = p_alloc(readLen, false);
+        }
+
         try {
-            mPageArray.readPage(index, page, 0, start + length);
+            mPageArray.readPage(index, page, 0, readLen);
             p_copyToArray(page, start, buf, offset, length);
         } finally {
             p_delete(page);

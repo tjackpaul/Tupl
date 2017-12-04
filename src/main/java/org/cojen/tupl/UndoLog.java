@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
 
 import static java.lang.System.arraycopy;
@@ -89,6 +90,9 @@ final class UndoLog implements DatabaseAccess {
     // Indicates that transaction has been committed and log is partially truncated.
     static final byte OP_COMMIT_TRUNCATE = (byte) 5;
 
+    // Same as OP_UNINSERT, except uses OP_ACTIVE_KEY. (ValueAccessor op)
+    static final byte OP_UNCREATE = (byte) 12;
+
     // All ops less than 16 have no payload.
     private static final byte PAYLOAD_OP = (byte) 16;
 
@@ -115,6 +119,9 @@ final class UndoLog implements DatabaseAccess {
     // Payload is Node-encoded key and trash id, to undo a fragmented value delete.
     static final byte OP_UNDELETE_FRAGMENTED = (byte) 22;
 
+    // Payload is a key for ValueAccessor operations.
+    static final byte OP_ACTIVE_KEY = (byte) 23;
+
     // Payload is custom message.
     static final byte OP_CUSTOM = (byte) 24;
 
@@ -128,6 +135,15 @@ final class UndoLog implements DatabaseAccess {
 
     // Payload is a (large) key and trash id, to undo a fragmented value delete.
     static final byte OP_UNDELETE_LK_FRAGMENTED = (byte) (OP_UNDELETE_FRAGMENTED + LK_ADJUST); //27
+
+    // Payload is the value length to undo a value extension. (ValueAccessor op)
+    static final byte OP_UNEXTEND = (byte) 29;
+
+    // Payload is the value length and position to undo value hole fill. (ValueAccessor op)
+    static final byte OP_UNALLOC = (byte) 30;
+
+    // Payload is the value position and bytes to undo a value write. (ValueAccessor op)
+    static final byte OP_UNWRITE = (byte) 31;
 
     private final LocalDatabase mDatabase;
     private final long mTxnId;
@@ -146,6 +162,9 @@ final class UndoLog implements DatabaseAccess {
     private int mNodeTopPos;
 
     private long mActiveIndexId;
+
+    // Active key is used for ValueAccessor operations.
+    private byte[] mActiveKey;
 
     UndoLog(LocalDatabase db, long txnId) {
         mDatabase = db;
@@ -241,7 +260,7 @@ final class UndoLog implements DatabaseAccess {
      */
     final void pushUninsert(final long indexId, byte[] key) throws IOException {
         setActiveIndexId(indexId);
-        doPush(OP_UNINSERT, key, 0, key.length, calcUnsignedVarIntLength(key.length));
+        doPush(OP_UNINSERT, key);
     }
 
     /**
@@ -258,7 +277,7 @@ final class UndoLog implements DatabaseAccess {
         if ((payload[off] & 0xc0) == 0xc0) {
             // Key is fragmented and cannot be stored as-is, so expand it fully and switch to
             // using the "LK" op variant.
-            /*P*/ byte[] copy = p_transfer(payload);
+            /*P*/ byte[] copy = p_transfer(payload, false);
             try {
                 payload = Node.expandKeyAtLoc(this, copy, off, len, op != OP_UNDELETE_FRAGMENTED);
             } finally {
@@ -269,7 +288,7 @@ final class UndoLog implements DatabaseAccess {
             op += LK_ADJUST;
         }
 
-        doPush(op, payload, off, len, calcUnsignedVarIntLength(len));
+        doPush(op, payload, off, len);
     }
 
     /**
@@ -299,7 +318,7 @@ final class UndoLog implements DatabaseAccess {
             DirectPageOps.p_copyToArray(payloadPtr, off, payload, 0, len);
         }
 
-        doPush(op, payload, 0, payload.length, calcUnsignedVarIntLength(payload.length));
+        doPush(op, payload);
     }
 
     private void setActiveIndexId(long indexId) throws IOException {
@@ -321,9 +340,148 @@ final class UndoLog implements DatabaseAccess {
         doPush(OP_COMMIT);
     }
 
+    /**
+     * Caller must hold db commit lock.
+     */
     void pushCustom(byte[] message) throws IOException {
-        int len = message.length;
-        doPush(OP_CUSTOM, message, 0, len, calcUnsignedVarIntLength(len));
+        doPush(OP_CUSTOM, message);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     */
+    void pushUncreate(long indexId, byte[] key) throws IOException {
+        setActiveIndexIdAndKey(indexId, key);
+        doPush(OP_UNCREATE);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     *
+     * @param savepoint used to check if op isn't necessary
+     */
+    void pushUnextend(long savepoint, long indexId, byte[] key, long length) throws IOException {
+        if (setActiveIndexIdAndKey(indexId, key) && savepoint < mLength) discardCheck: {
+            // Check if op isn't necessary because it's action will be superceded by another.
+
+            long unlen;
+
+            Node node = mNode;
+            if (node == null) {
+                byte op = mBuffer[mBufferPos];
+                if (op == OP_UNCREATE) {
+                    return;
+                }
+                if (op != OP_UNEXTEND) {
+                    break discardCheck;
+                }
+                int pos = mBufferPos + 1;
+                int payloadLen = decodeUnsignedVarInt(mBuffer, pos);
+                pos += calcUnsignedVarIntLength(payloadLen);
+                IntegerRef.Value offsetRef = new IntegerRef.Value();
+                offsetRef.value = pos;
+                unlen = decodeUnsignedVarLong(mBuffer, offsetRef);
+            } else {
+                byte op = p_byteGet(mNode.mPage, mNodeTopPos);
+                if (op == OP_UNCREATE) {
+                    return;
+                }
+                if (op != OP_UNEXTEND) {
+                    break discardCheck;
+                }
+                int pos = mNodeTopPos + 1;
+                int payloadLen = p_uintGetVar(mNode.mPage, pos);
+                pos += calcUnsignedVarIntLength(payloadLen);
+                if (pos + payloadLen > pageSize(mNode.mPage)) {
+                    // Don't bother decoding payload which spills into the next node.
+                    break discardCheck;
+                }
+                IntegerRef.Value offsetRef = new IntegerRef.Value();
+                offsetRef.value = pos;
+                unlen = p_ulongGetVar(mNode.mPage, offsetRef);
+            }
+
+            if (unlen <= length) {
+                // Existing unextend length will truncate at least as much.
+                return;
+            }
+        }
+
+        byte[] payload = new byte[9];
+        int off = encodeUnsignedVarLong(payload, 0, length);
+        doPush(OP_UNEXTEND, payload, 0, off);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     */
+    void pushUnalloc(long indexId, byte[] key, long pos, long length) throws IOException {
+        setActiveIndexIdAndKey(indexId, key);
+        byte[] payload = new byte[9 + 9];
+        int off = encodeUnsignedVarLong(payload, 0, length);
+        off = encodeUnsignedVarLong(payload, off, pos);
+        doPush(OP_UNALLOC, payload, 0, off);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     */
+    void pushUnwrite(long indexId, byte[] key, long pos, byte[] b, int off, int len)
+        throws IOException
+    {
+        setActiveIndexIdAndKey(indexId, key);
+        int pLen = calcUnsignedVarLongLength(pos);
+        int varIntLen = calcUnsignedVarIntLength(pLen + len);
+        doPush(OP_UNWRITE, b, off, len, varIntLen, pLen);
+
+        // Now encode the pos in the reserved region before the payload.
+        Node node = mNode;
+        int posOff = 1 + varIntLen;
+        if (node != null) {
+            p_ulongPutVar(node.mPage, mNodeTopPos + posOff, pos);
+        } else {
+            encodeUnsignedVarLong(mBuffer, mBufferPos + posOff, pos);
+        }
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     */
+    void pushUnwrite(long indexId, byte[] key, long pos, long ptr, int off, int len)
+        throws IOException
+    {
+        byte[] b = new byte[len];
+        DirectPageOps.p_copyToArray(ptr, off, b, 0, len);
+        pushUnwrite(indexId, key, pos, b, 0, len);
+    }
+
+    /**
+     * @return true if active index and key already match
+     */
+    private boolean setActiveIndexIdAndKey(long indexId, byte[] key) throws IOException {
+        boolean result = true;
+
+        long activeIndexId = mActiveIndexId;
+        if (indexId != activeIndexId) {
+            if (activeIndexId != 0) {
+                byte[] payload = new byte[8];
+                encodeLongLE(payload, 0, activeIndexId);
+                doPush(OP_INDEX, payload, 0, 8, 1);
+            }
+            mActiveIndexId = indexId;
+            result = false;
+        }
+
+        byte[] activeKey = mActiveKey;
+        if (!Arrays.equals(key, activeKey)) {
+            if (activeKey != null) {
+                doPush(OP_ACTIVE_KEY, mActiveKey);
+            }
+            mActiveKey = key;
+            result = false;
+        }
+
+        return result;
     }
 
     /**
@@ -336,11 +494,39 @@ final class UndoLog implements DatabaseAccess {
     /**
      * Caller must hold db commit lock.
      */
+    private void doPush(final byte op, final byte[] payload) throws IOException {
+        doPush(op, payload, 0, payload.length);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     */
+    private void doPush(final byte op, final byte[] payload, final int off, final int len)
+        throws IOException
+    {
+        doPush(op, payload, off, len, calcUnsignedVarIntLength(len), 0);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     */
     private void doPush(final byte op, final byte[] payload, final int off, final int len,
                         final int varIntLen)
         throws IOException
     {
-        final int encodedLen = 1 + varIntLen + len;
+        doPush(op, payload, off, len, varIntLen, 0);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     *
+     * @param pLen space to reserve before the payload; must be accounted for in varIntLen
+     */
+    private void doPush(final byte op, final byte[] payload, final int off, final int len,
+                        final int varIntLen, final int pLen)
+        throws IOException
+    {
+        final int encodedLen = 1 + varIntLen + pLen + len;
 
         Node node = mNode;
         if (node != null) {
@@ -400,7 +586,12 @@ final class UndoLog implements DatabaseAccess {
                 }
             }
 
-            writeBufferEntry(buffer, pos -= encodedLen, op, payload, off, len);
+            pos -= encodedLen;
+            buffer[pos] = op;
+            if (op >= PAYLOAD_OP) {
+                int payloadPos = encodeUnsignedVarInt(buffer, pos + 1, pLen + len) + pLen;
+                arraycopy(payload, off, buffer, payloadPos, len);
+            }
             mBufferPos = pos;
             mLength += encodedLen;
             return;
@@ -409,7 +600,13 @@ final class UndoLog implements DatabaseAccess {
         int pos = mNodeTopPos;
         int available = pos - HEADER_SIZE;
         if (available >= encodedLen) {
-            writePageEntry(node.mPage, pos -= encodedLen, op, payload, off, len);
+            pos -= encodedLen;
+            /*P*/ byte[] page = node.mPage;
+            p_bytePut(page, pos, op);
+            if (op >= PAYLOAD_OP) {
+                int payloadPos = p_uintPutVar(page, pos + 1, pLen + len) + pLen;
+                p_copyFromArray(payload, off, page, payloadPos, len);
+            }
             node.releaseExclusive();
             mNodeTopPos = pos;
             mLength += encodedLen;
@@ -427,9 +624,9 @@ final class UndoLog implements DatabaseAccess {
             /*P*/ byte[] page = node.mPage;
             p_copyFromArray(payload, off + remaining, page, pos, amt);
 
-            if (remaining <= 0 && available >= (1 + varIntLen)) {
+            if (remaining <= 0 && available >= (encodedLen - len)) {
                 if (varIntLen > 0) {
-                    p_uintPutVar(page, pos -= varIntLen, len);
+                    p_uintPutVar(page, pos -= varIntLen + pLen, pLen + len);
                 }
                 p_bytePut(page, --pos, op);
                 node.releaseExclusive();
@@ -574,13 +771,15 @@ final class UndoLog implements DatabaseAccess {
             }
             mLength = 0;
             mActiveIndexId = 0;
+            mActiveKey = null;
         }
 
         return shared;
     }
 
     /**
-     * Rollback all log entries. Caller does not need to hold db commit lock.
+     * Rollback all log entries, and then discard this UndoLog object. Caller does not need to
+     * hold db commit lock.
      */
     final void rollback() throws IOException {
         if (mLength == 0) {
@@ -600,10 +799,6 @@ final class UndoLog implements DatabaseAccess {
      * @param savepoint must be less than mLength
      */
     private void doRollback(long savepoint) throws IOException {
-        // Implementation could be optimized somewhat, resulting in less
-        // temporary arrays and copies. Rollback optimization is generally not
-        // necessary, since most transactions are expected to commit.
-
         byte[] opRef = new byte[1];
         Index activeIndex = null;
         do {
@@ -642,10 +837,15 @@ final class UndoLog implements DatabaseAccess {
             case OP_SCOPE_COMMIT:
             case OP_COMMIT:
             case OP_COMMIT_TRUNCATE:
+            case OP_UNCREATE:
             case OP_UNINSERT:
             case OP_UNUPDATE:
+            case OP_ACTIVE_KEY:
             case OP_CUSTOM:
             case OP_UNUPDATE_LK:
+            case OP_UNEXTEND:
+            case OP_UNALLOC:
+            case OP_UNWRITE:
                 // Ignore.
                 break;
 
@@ -722,6 +922,18 @@ final class UndoLog implements DatabaseAccess {
         case OP_INDEX:
             mActiveIndexId = decodeLongLE(entry, 0);
             activeIndex = null;
+            break;
+
+        case OP_UNCREATE:
+            while ((activeIndex = findIndex(activeIndex)) != null) {
+                try {
+                    activeIndex.delete(Transaction.BOGUS, mActiveKey);
+                    break;
+                } catch (ClosedIndexException e) {
+                    // User closed the shared index reference, so re-open it.
+                    activeIndex = null;
+                }
+            }
             break;
 
         case OP_UNINSERT:
@@ -823,6 +1035,53 @@ final class UndoLog implements DatabaseAccess {
             }
             handler.undo(db, entry);
             break;
+
+        case OP_ACTIVE_KEY:
+            mActiveKey = entry;
+            break;
+
+        case OP_UNEXTEND:
+            long length = decodeUnsignedVarLong(entry, new IntegerRef.Value());
+            while ((activeIndex = findIndex(activeIndex)) != null) {
+                try (Cursor c = activeIndex.newAccessor(Transaction.BOGUS, mActiveKey)) {
+                    c.setValueLength(length);
+                    break;
+                } catch (ClosedIndexException e) {
+                    // User closed the shared index reference, so re-open it.
+                    activeIndex = null;
+                }
+            }
+            break;
+
+        case OP_UNALLOC:
+            IntegerRef offsetRef = new IntegerRef.Value();
+            length = decodeUnsignedVarLong(entry, offsetRef);
+            long pos = decodeUnsignedVarLong(entry, offsetRef);
+            while ((activeIndex = findIndex(activeIndex)) != null) {
+                try (Cursor c = activeIndex.newAccessor(Transaction.BOGUS, mActiveKey)) {
+                    c.valueClear(pos, length);
+                    break;
+                } catch (ClosedIndexException e) {
+                    // User closed the shared index reference, so re-open it.
+                    activeIndex = null;
+                }
+            }
+            break;
+
+        case OP_UNWRITE:
+            offsetRef = new IntegerRef.Value();
+            pos = decodeUnsignedVarLong(entry, offsetRef);
+            int off = offsetRef.get();
+            while ((activeIndex = findIndex(activeIndex)) != null) {
+                try (Cursor c = activeIndex.newAccessor(Transaction.BOGUS, mActiveKey)) {
+                    c.valueWrite(pos, entry, off, entry.length - off);
+                    break;
+                } catch (ClosedIndexException e) {
+                    // User closed the shared index reference, so re-open it.
+                    activeIndex = null;
+                }
+            }
+            break;
         }
 
         return activeIndex;
@@ -830,7 +1089,7 @@ final class UndoLog implements DatabaseAccess {
 
     private byte[] decodeNodeKey(byte[] entry) throws IOException {
         byte[] key;
-        /*P*/ byte[] pentry = p_transfer(entry);
+        /*P*/ byte[] pentry = p_transfer(entry, false);
         try {
             key = Node.retrieveKeyAtLoc(this, pentry, 0);
         } finally {
@@ -841,7 +1100,7 @@ final class UndoLog implements DatabaseAccess {
 
     private byte[][] decodeNodeKeyValuePair(byte[] entry) throws IOException {
         byte[][] pair;
-        /*P*/ byte[] pentry = p_transfer(entry);
+        /*P*/ byte[] pentry = p_transfer(entry, false);
         try {
             pair = Node.retrieveKeyValueAtLoc(this, pentry, 0);
         } finally {
@@ -1034,26 +1293,6 @@ final class UndoLog implements DatabaseAccess {
         return lowerNode;
     }
 
-    private static void writeBufferEntry(byte[] dest, int destPos,
-                                         byte op, byte[] payload, int off, int len)
-    {
-        dest[destPos] = op;
-        if (op >= PAYLOAD_OP) {
-            int payloadPos = encodeUnsignedVarInt(dest, destPos + 1, len);
-            arraycopy(payload, off, dest, payloadPos, len);
-        }
-    }
-
-    private static void writePageEntry(/*P*/ byte[] page, int pagePos,
-                                       byte op, byte[] payload, int off, int len)
-    {
-        p_bytePut(page, pagePos, op);
-        if (op >= PAYLOAD_OP) {
-            int payloadPos = p_uintPutVar(page, pagePos + 1, len);
-            p_copyFromArray(payload, off, page, payloadPos, len);
-        }
-    }
-
     /**
      * Caller must hold db commit lock.
      */
@@ -1071,6 +1310,13 @@ final class UndoLog implements DatabaseAccess {
      * @return new or original workspace instance
      */
     final byte[] writeToMaster(UndoLog master, byte[] workspace) throws IOException {
+        if (mActiveKey != null) {
+            doPush(OP_ACTIVE_KEY, mActiveKey);
+            // Set to null to reduce redundant pushes if transaction is long lived and is
+            // written to the master multiple times.
+            mActiveKey = null;
+        }
+
         Node node = mNode;
         if (node == null) {
             byte[] buffer = mBuffer;
@@ -1090,8 +1336,7 @@ final class UndoLog implements DatabaseAccess {
             writeHeaderToMaster(workspace);
             encodeShortLE(workspace, (8 + 8), bsize);
             arraycopy(buffer, pos, workspace, (8 + 8 + 2), bsize);
-            master.doPush(OP_LOG_COPY, workspace, 0, psize,
-                          calcUnsignedVarIntLength(psize));
+            master.doPush(OP_LOG_COPY, workspace, 0, psize);
         } else {
             if (workspace == null) {
                 workspace = new byte[INITIAL_BUFFER_SIZE];
@@ -1265,6 +1510,23 @@ final class UndoLog implements DatabaseAccess {
 
             case OP_CUSTOM:
                 break;
+
+            case OP_ACTIVE_KEY:
+                if (lockMode != LockMode.UNSAFE) {
+                    mActiveKey = entry;
+                }
+                break;
+
+            case OP_UNCREATE:
+            case OP_UNEXTEND:
+            case OP_UNALLOC:
+            case OP_UNWRITE:
+                if (mActiveKey != null) {
+                    scope.addLock(mActiveIndexId, mActiveKey);
+                    // Avoid creating a huge list of redundant Lock objects.
+                    mActiveKey = null;
+                }
+                break;
             }
         }
 
@@ -1314,6 +1576,10 @@ final class UndoLog implements DatabaseAccess {
             opStr = "COMMIT_TRUNCATE";
             break;
 
+        case OP_UNCREATE:
+            opStr = "UNCREATE";
+            break;
+
         case OP_LOG_COPY:
             opStr = "LOG_COPY";
             break;
@@ -1347,6 +1613,12 @@ final class UndoLog implements DatabaseAccess {
                 new String(key, StandardCharsets.UTF_8) + ')';
             break;
 
+        case OP_ACTIVE_KEY:
+            opStr = "ACTIVE_KEY";
+            payloadStr = "key=0x" + Utils.toHex(entry) + " (" +
+                new String(entry, StandardCharsets.UTF_8) + ')';
+            break;
+
         case OP_CUSTOM:
             opStr = "CUSTOM";
             payloadStr = "entry=0x" + Utils.toHex(entry);
@@ -1355,28 +1627,47 @@ final class UndoLog implements DatabaseAccess {
         case OP_UNUPDATE_LK: case OP_UNDELETE_LK:
             opStr = op == OP_UNUPDATE ? "UNUPDATE_LK" : "UNDELETE_LK";
 
-            key = new byte[decodeUnsignedVarInt(entry, 0)];
-            int keyLoc = calcUnsignedVarIntLength(key.length);
-            arraycopy(entry, keyLoc, key, 0, key.length);
+            int keyLen = decodeUnsignedVarInt(entry, 0);
+            int keyLoc = calcUnsignedVarIntLength(keyLen);
+            int valueLoc = keyLoc + keyLen;
+            int valueLen = entry.length - valueLoc;
 
-            int valueLoc = keyLoc + key.length;
-            byte[] value = new byte[entry.length - valueLoc];
-            arraycopy(entry, valueLoc, value, 0, value.length);
-
-            payloadStr = "key=0x" + Utils.toHex(key) + " (" +
-                new String(key, StandardCharsets.UTF_8) + ") value=0x" + Utils.toHex(value);
+            payloadStr = "key=0x" + Utils.toHex(entry, keyLoc, keyLen) + " (" +
+                new String(entry, keyLoc, keyLen, StandardCharsets.UTF_8) + ") value=0x" +
+                Utils.toHex(entry, valueLoc, valueLen);
 
             break;
 
         case OP_UNDELETE_LK_FRAGMENTED:
             opStr = "UNDELETE_LK_FRAGMENTED";
 
-            key = new byte[decodeUnsignedVarInt(entry, 0)];
-            arraycopy(entry, calcUnsignedVarIntLength(key.length), key, 0, key.length);
+            keyLen = decodeUnsignedVarInt(entry, 0);
+            keyLoc = calcUnsignedVarIntLength(keyLen);
 
-            payloadStr = "key=0x" + Utils.toHex(key) + " (" +
-                new String(key, StandardCharsets.UTF_8) + ')';
+            payloadStr = "key=0x" + Utils.toHex(entry, keyLoc, keyLen) + " (" +
+                new String(entry, keyLoc, keyLen, StandardCharsets.UTF_8) + ')';
 
+            break;
+
+        case OP_UNEXTEND:
+            opStr = "UNEXTEND";
+            payloadStr = "length=" + decodeUnsignedVarLong(entry, new IntegerRef.Value());
+            break;
+
+        case OP_UNALLOC:
+            opStr = "UNALLOC";
+            IntegerRef offsetRef = new IntegerRef.Value();
+            long length = decodeUnsignedVarLong(entry, offsetRef);
+            long pos = decodeUnsignedVarLong(entry, offsetRef);
+            payloadStr = "pos=" + pos + ", length=" + length;
+            break;
+
+        case OP_UNWRITE:
+            opStr = "UNWRITE";
+            offsetRef = new IntegerRef.Value();
+            pos = decodeUnsignedVarLong(entry, offsetRef);
+            int off = offsetRef.get();
+            payloadStr = "pos=" + pos + ", value=0x" + Utils.toHex(entry, off, entry.length - off);
             break;
         }
 

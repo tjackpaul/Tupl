@@ -610,15 +610,6 @@ class _Tree implements View, Index {
         return check(txn).lockCheck(mId, key);
     }
 
-    /*
-    @Override
-    public Stream newStream() {
-        _TreeCursor cursor = newCursor();
-        cursor.autoload(false);
-        return new _TreeValueStream(cursor);
-    }
-    */
-
     @Override
     public View viewGe(byte[] key) {
         return BoundedView.viewGe(this, key);
@@ -1236,7 +1227,6 @@ class _Tree implements View, Index {
                 return node;
             }
 
-            // TODO: Quick check by trying to latch upwards. Give up if parent is split.
             final _CursorFrame parentFrame = frame.mParentFrame;
             node.releaseExclusive();
 

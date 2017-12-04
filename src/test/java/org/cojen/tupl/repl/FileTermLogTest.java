@@ -31,6 +31,8 @@ import java.util.Random;
 
 import java.util.concurrent.TimeUnit;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import org.junit.*;
 import static org.junit.Assert.*;
 
@@ -132,7 +134,7 @@ public class FileTermLogTest {
 
         while (true) {
             assertEquals(index, reader.index());
-            int amt = reader.readAny(buf, 0, buf.length);
+            int amt = reader.tryReadAny(buf, 0, buf.length);
             if (amt <= 0) {
                 assertTrue(amt == 0);
                 break;
@@ -152,12 +154,14 @@ public class FileTermLogTest {
         mLog.finishTerm(index);
         assertEquals(index, mLog.endIndex());
 
+        /* Extending the term is allowed, because conflicting empty terms can be removed.
         try {
             mLog.finishTerm(index + 1);
             fail();
         } catch (IllegalStateException e) {
             // Expected.
         }
+        */
 
         // Cannot write past end.
         if (reopen) {
@@ -202,10 +206,11 @@ public class FileTermLogTest {
 
     private void reopenCleanup(boolean discoverStart) throws Exception {
         mLog.close();
+        final long prevTerm = 0;
         final long term = 1;
         final long startIndex = 1000;
         mLog = FileTermLog.openTerm
-            (mWorker, mBase, 0, term, startIndex, startIndex, startIndex, null);
+            (mWorker, mBase, prevTerm, term, startIndex, startIndex, startIndex, null);
 
         final byte[] buf = new byte[1000];
         Random rnd = new Random(62723);
@@ -224,26 +229,31 @@ public class FileTermLogTest {
 
         writer.release();
 
-        final String basePath = mBase.getPath() + '.' + term;
+        final String basePath = mBase.getPath() + '.';
 
         // Create some files that should be ignored.
         new File(basePath).createNewFile();
+        new File(basePath + term).createNewFile();
         TestUtils.newTempBaseFile(getClass()).createNewFile();
         new File(basePath + "foo").createNewFile();
         new File(basePath + ".foo").createNewFile();
         new File(basePath + ".123foo").createNewFile();
-        new File(basePath + ".123.foo").createNewFile();
+        new File(basePath + "..123.foo").createNewFile();
+        new File(basePath + term + "foo").createNewFile();
+        new File(basePath + term + ".foo").createNewFile();
+        new File(basePath + term + ".123foo").createNewFile();
+        new File(basePath + '.' + term + ".foo").createNewFile();
 
         // Create some out-of-bounds segments that should be deleted.
-        File low = new File(basePath + ".123");
+        File low = new File(basePath + term + ".123." + prevTerm);
         low.createNewFile();
         assertTrue(low.exists());
-        File high = new File(basePath + ".999999999999");
+        File high = new File(basePath + term + ".999999999999");
         high.createNewFile();
         assertTrue(high.exists());
-       
+
         // Expand a segment that should be truncated.
-        File first = new File(basePath + ".1000");
+        File first = new File(basePath + term + ".1000." + prevTerm);
         assertTrue(first.exists());
         long firstLen = first.length();
         assertTrue(firstLen > 1_000_000);
@@ -263,7 +273,7 @@ public class FileTermLogTest {
         } else {
             try {
                 FileTermLog.openTerm
-                    (mWorker, mBase, 0, term, -1, startIndex, info.mHighestIndex, null);
+                    (mWorker, mBase, -1, term, -1, startIndex, info.mHighestIndex, null);
                 fail();
             } catch (Exception e) {
                 assertTrue(e.getMessage().indexOf(low.toString()) >= 0);
@@ -275,8 +285,16 @@ public class FileTermLogTest {
             startWith = -1;
         }
 
+        try {
+            mLog = FileTermLog.openTerm
+                (mWorker, mBase, 12, term, startWith, startIndex, info.mHighestIndex, null);
+            fail();
+        } catch (IllegalStateException e) {
+            // Mismatched previous term.
+        }
+
         mLog = FileTermLog.openTerm
-            (mWorker, mBase, 0, term, startWith, startIndex, info.mHighestIndex, null);
+            (mWorker, mBase, -1, term, startWith, startIndex, info.mHighestIndex, null);
 
         if (low != null) {
             assertTrue(!low.exists());
@@ -295,7 +313,7 @@ public class FileTermLogTest {
 
         while (true) {
             assertEquals(index, reader.index());
-            int amt = reader.readAny(buf, 0, buf.length);
+            int amt = reader.tryReadAny(buf, 0, buf.length);
             if (amt <= 0) {
                 assertTrue(amt == 0);
                 break;
@@ -320,7 +338,7 @@ public class FileTermLogTest {
 
         try {
             FileTermLog.openTerm
-                (mWorker, mBase, 0, term, startWith, startIndex, info.mHighestIndex, null);
+                (mWorker, mBase, prevTerm, term, startWith, startIndex, info.mHighestIndex, null);
             fail();
         } catch (Exception e) {
             String msg = e.getMessage();
@@ -340,11 +358,11 @@ public class FileTermLogTest {
     }
 
     @Test
-    public void tailAndTruncate() throws Throwable {
+    public void tailAndCompact() throws Throwable {
         tail(true);
     }
 
-    private void tail(boolean truncate) throws Throwable {
+    private void tail(boolean compact) throws Throwable {
         // Write and commit a bunch of data, while concurrently reading it.
 
         final int seed = 762390;
@@ -360,9 +378,6 @@ public class FileTermLogTest {
                     Random rnd2 = new Random(seed + 1);
                     LogReader reader = mLog.openReader(0);
 
-                    int truncateAdvance = 0;
-                    int truncateNotAdvance = 0;
-
                     while (true) {
                         int amt = reader.read(buf, 0, buf.length);
                         if (amt <= 0) {
@@ -372,22 +387,12 @@ public class FileTermLogTest {
                         for (int j=0; j<amt; j++) {
                             assertEquals((byte) rnd2.nextInt(), buf[j]);
                         }
-                        if (truncate) {
-                            mLog.truncateStart(reader.index());
-                            if (mLog.startIndex() != reader.index()) {
-                                truncateAdvance++;
-                            } else {
-                                truncateNotAdvance++;
-                            }
+                        if (compact) {
+                            mLog.compact(reader.index());
                         }
                     }
 
                     mTotal = reader.index();
-
-                    if (truncate) {
-                        assertNotEquals(0, truncateAdvance);
-                        assertNotEquals(0, truncateNotAdvance);
-                    }
                 } catch (Throwable e) {
                     mEx = e;
                 }
@@ -418,7 +423,7 @@ public class FileTermLogTest {
             assertEquals(index, info.mHighestIndex);
 
             long commitIndex = index + (rnd.nextInt(1000) - 500);
-            if (commitIndex >= 0) {
+            if (commitIndex >= 0 && i < (100000 - 1)) {
                 mLog.commit(commitIndex);
             }
         }
@@ -435,11 +440,12 @@ public class FileTermLogTest {
         assertEquals(index, mLog.endIndex());
         r.join();
 
-        assertEquals(index, r.mTotal);
         Throwable ex = r.mEx;
         if (ex != null) {
             throw ex;
         }
+
+        assertEquals(index, r.mTotal);
     }
 
     @Test
@@ -597,23 +603,34 @@ public class FileTermLogTest {
         TestUtils.startAndWaitUntilBlocked(new Thread(() -> {
             TestUtils.sleep(1000);
             try {
-                mLog.finishTerm(findex);
+                LogWriter w = mLog.openWriter(findex);
+                int rem = 100 - msg3.length;
+                byte[] b = new byte[(int) (findex + rem)]; 
+                for (int i=0; i<b.length; i++) {
+                    b[i] = (byte) (i + 1);
+                }
+                write(w, b);
+                mLog.finishTerm(findex + rem);
             } catch (IOException e) {
                 Utils.uncaught(e);
             }
         }));
 
-        waiter = new Waiter(index + 1, upon);
+        waiter = new Waiter(index + 101, upon);
         waiter.begin();
         assertEquals(-1, waiter.waitForResult(-1));
 
         // Verify that everything is read back properly, with no blocking.
         byte[] complete = concat(msg1, msg2, msg3);
-        byte[] buf = new byte[100];
+        byte[] buf = new byte[complete.length + 100 - msg3.length];
         LogReader reader = mLog.openReader(0);
         int amt = reader.read(buf, 0, buf.length);
+        assertEquals(buf.length, amt);
         reader.release();
-        TestUtils.fastAssertArrayEquals(complete, Arrays.copyOf(buf, amt));
+        TestUtils.fastAssertArrayEquals(complete, Arrays.copyOf(buf, complete.length));
+        for (int i=0; i<(100 - msg3.length); i++) {
+            assertEquals((byte) (i + 1), buf[i + complete.length]);
+        }
     }
 
     @Test
@@ -955,13 +972,137 @@ public class FileTermLogTest {
         try {
             mLog.finishTerm(100);
             fail();
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalStateException e) {
             // Expected.
         }
     }
 
+    @Test
+    public void clampHighest() throws Exception {
+        // Verify that the highest index cannot be set higher than the contiguous index.
+
+        LogWriter writer = mLog.openWriter(0);
+        write(writer, new byte[100]);
+
+        LogInfo info = new LogInfo();
+        mLog.captureHighest(info);
+        assertEquals(100, info.mHighestIndex);
+
+        write(writer, new byte[100], 250);
+        mLog.captureHighest(info);
+        assertEquals(100, info.mHighestIndex);
+
+        write(writer, new byte[100], 250);
+        mLog.captureHighest(info);
+        assertEquals(250, info.mHighestIndex);
+    }
+
+    @Test
+    public void compactionZone() throws Exception {
+        // Reads from the compaction zone should fail, and writes into the compaction zone
+        // should be ignored.
+
+        LogWriter writer = mLog.openWriter(0);
+        byte[] b = new byte[10000];
+        for (int i=0; i<1000; i++) {
+            write(writer, b);
+        }
+        writer.release();
+
+        long commitIndex = 1_500_000;
+        mLog.commit(commitIndex);
+        mLog.compact(commitIndex);
+
+        LogReader reader = mLog.openReader(0);
+        try {
+            int amt = reader.read(b);
+            System.out.println(amt);
+            fail();
+        } catch (IllegalStateException e) {
+            // Too low.
+        }
+
+        reader.release();
+
+        writer = mLog.openWriter(0);
+        assertEquals(0, writer.write(b));
+        writer.release();
+
+        // Some segment overlap. Although the higher portion of the write could be written, the
+        // returned amount from the write wouldn't make sense. Ditch it all.
+
+        writer = mLog.openWriter(1024 * 1024 - 100);
+        assertEquals(0, writer.write(b));
+        writer.release();
+
+        // Try again with writers that reference deleted segements.
+
+        writer = mLog.openWriter(commitIndex);
+        for (int i=0; i<1000; i++) {
+            write(writer, b);
+        }
+        writer.release();
+
+        // Re-open at the start index.
+        writer = mLog.openWriter(commitIndex);
+        // Force segement to be referenced.
+        writer.write(b);
+
+        long commitIndex2 = 4_000_000;
+        mLog.commit(commitIndex2);
+        mLog.compact(commitIndex2);
+
+        assertEquals(0, writer.write(b));
+        writer.release();
+    }
+
+    @Test
+    public void commitBoostHighest() throws Exception {
+        // Commit should advance the highest index in some cases, because not all writes are
+        // expected to provide a highest index. Replies for missing data don't provide a
+        // highest index, and then the term might end before the leader writes again.
+
+        LogWriter writer = mLog.openWriter(0);
+        write(writer, new byte[100], 0);
+        writer.release();
+
+        AtomicReference<Object> result = new AtomicReference<>();
+
+        Thread stuckReader = TestUtils.startAndWaitUntilBlocked(new Thread(() -> {
+            try {
+                byte[] buf = new byte[1000];
+                LogReader reader = mLog.openReader(0);
+                result.set(reader.read(buf));
+            } catch (Throwable e) {
+                result.set(e);
+            }
+        }));
+
+        assertNull(result.get());
+
+        mLog.commit(200);
+        mLog.finishTerm(200);
+
+        byte[] buf = new byte[1000];
+
+        LogReader reader = mLog.openReader(0);
+        int amt = reader.read(buf);
+        assertEquals(100, amt);
+        reader.release();
+
+        stuckReader.join();
+        assertEquals(100, result.get());
+    }
+
     private static void write(LogWriter writer, byte[] data) throws IOException {
         int amt = writer.write(data, 0, data.length, writer.index() + data.length);
+        assertEquals(data.length, amt);
+    }
+
+    private static void write(LogWriter writer, byte[] data, long highestIndex)
+        throws IOException
+    {
+        int amt = writer.write(data, 0, data.length, highestIndex);
         assertEquals(data.length, amt);
     }
 

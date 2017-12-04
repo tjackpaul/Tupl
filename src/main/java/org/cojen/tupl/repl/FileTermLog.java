@@ -38,6 +38,7 @@ import java.util.concurrent.locks.LockSupport;
 
 import java.util.function.BiFunction;
 
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.cojen.tupl.io.FileIO;
@@ -68,17 +69,17 @@ final class FileTermLog extends Latch implements TermLog {
     private final File mBase;
     private final long mLogPrevTerm;
     private final long mLogTerm;
+    private final long mLogStartIndex;
 
     /*
       In general, legal index values are bounded as follows:
 
         start <= commit <= highest <= contig <= end
 
-      Commit index field can be larger than the highest index, but the actual reported value is
+      Commit index field can be larger than the highest index, but the appliable index is:
         min(commit, highest).
     */
 
-    private long mLogStartIndex;
     private long mLogCommitIndex;
     private long mLogHighestIndex;
     private long mLogContigIndex;
@@ -119,6 +120,7 @@ final class FileTermLog extends Latch implements TermLog {
     /**
      * Create or open an existing term.
      *
+     * @param prevTerm pass -1 to discover the prev term
      * @param startIndex pass -1 to discover the start index
      * @param segmentFileNames pass null to discover segment files
      */
@@ -130,8 +132,11 @@ final class FileTermLog extends Latch implements TermLog {
 
         if (segmentFileNames == null) {
             String[] namesArray = base.getParentFile().list();
+
             if (namesArray != null && namesArray.length != 0) {
-                Pattern p = Pattern.compile(base.getName() + "\\." + term + "\\.\\d*");
+                // This pattern matches the term, and it discards the optional prevTerm.
+                Pattern p = Pattern.compile(base.getName() + "\\." + term + "\\.\\d+(?:\\.\\d+)?");
+
                 segmentFileNames = new ArrayList<>();
                 for (String name : namesArray) {
                     if (p.matcher(name).matches()) {
@@ -163,6 +168,7 @@ final class FileTermLog extends Latch implements TermLog {
     }
 
     /**
+     * @param prevTerm pass -1 to discover the prev term
      * @param startIndex pass -1 to discover the start index
      * @param segmentFileNames pass null when creating a term
      */
@@ -181,7 +187,6 @@ final class FileTermLog extends Latch implements TermLog {
 
         mWorker = worker;
         mBase = base;
-        mLogPrevTerm = prevTerm;
         mLogTerm = term;
 
         mSegments = new ConcurrentSkipListSet<>();
@@ -191,14 +196,47 @@ final class FileTermLog extends Latch implements TermLog {
 
             File parent = base.getParentFile();
 
+            // This pattern captures required start index and the optional prevTerm.
+            Pattern p = Pattern.compile(base.getName() + "\\." + term + "\\.(\\d+)(?:\\.(\\d+))?");
+
+            boolean anyMatches = false;
+
             for (String name : segmentFileNames) {
-                long start = Long.parseLong(name.substring(name.lastIndexOf('.') + 1));
+                Matcher m = p.matcher(name);
+
+                if (!m.matches()) {
+                    continue;
+                }
+
+                anyMatches = true;
+
+                long start = Long.parseLong(m.group(1));
+
+                String prevTermStr = m.group(2);
+
+                if (prevTermStr != null) {
+                    long parsedPrevTerm = Long.parseLong(prevTermStr);
+                    if (prevTerm < 0) {
+                        prevTerm = parsedPrevTerm;
+                    } else if (prevTerm != parsedPrevTerm) {
+                        throw new IllegalStateException
+                            ("Mismatched previous term: " + prevTerm + " != " + prevTermStr);
+                    }
+                }
 
                 // Start with the desired max length, and then truncate on the second pass.
                 long maxLength = Math.max(maxSegmentLength(), new File(parent, name).length());
 
                 mSegments.add(new Segment(start, maxLength));
             }
+
+            if (prevTerm < 0 && anyMatches) {
+                prevTerm = term;
+            }
+        }
+
+        if (prevTerm < 0) {
+            throw new IllegalStateException("Unable to determine previous term");
         }
 
         if (startIndex == -1) {
@@ -215,6 +253,13 @@ final class FileTermLog extends Latch implements TermLog {
                     ("Missing start segment: " + startIndex + ", term=" + term);
             }
         }
+
+        mLogPrevTerm = prevTerm;
+        mLogStartIndex = startIndex;
+        mLogCommitIndex = commitIndex;
+        mLogHighestIndex = highestIndex;
+        mLogContigIndex = highestIndex;
+        mLogEndIndex = Long.MAX_VALUE;
 
         // Contiguous segments must exist from start to highest.
 
@@ -248,12 +293,6 @@ final class FileTermLog extends Latch implements TermLog {
             }
             return true;
         });
-
-        mLogStartIndex = startIndex;
-        mLogCommitIndex = commitIndex;
-        mLogHighestIndex = highestIndex;
-        mLogContigIndex = highestIndex;
-        mLogEndIndex = Long.MAX_VALUE;
 
         // Delete segments which are out of bounds.
         
@@ -320,88 +359,58 @@ final class FileTermLog extends Latch implements TermLog {
 
     @Override
     public long startIndex() {
-        acquireShared();
-        long index = mLogStartIndex;
-        releaseShared();
-        return index;
+        return mLogStartIndex;
     }
 
     @Override
     public long prevTermAt(long index) {
-        acquireShared();
-        try {
-            if (index < mLogStartIndex) {
-                throw new IllegalStateException
-                    ("Index is lower than start: " + index + " < " + mLogStartIndex);
-            }
-            // FIXME: This logic is broken when the start index changes. Need to have a
-            // distinct termStartIndex and logStartIndex.
-            return index == mLogStartIndex ? mLogPrevTerm : mLogTerm;
-        } finally {
-            releaseShared();
-        }
+        return index <= mLogStartIndex ? mLogPrevTerm : mLogTerm;
     }
 
     @Override
-    public void truncateStart(long startIndex) throws IOException {
-        if (mSegments.isEmpty()) {
-            acquireExclusive();
-            if (mSegments.isEmpty()) {
-                increaseStartIndex(startIndex);
-            }
-            releaseExclusive();
-        }
+    public boolean compact(long startIndex) throws IOException {
+        acquireShared();
+        boolean full = startIndex >= mLogEndIndex;
+        releaseShared();
 
-        // Delete all lower segments.
-
-        long appliedStartIndex = 0;
-        IOException ex = null;
-        
         Iterator<LKey<Segment>> it = mSegments.iterator();
         while (it.hasNext()) {
             Segment seg = (Segment) it.next();
 
             long endIndex = seg.endIndex();
             if (endIndex > startIndex) {
-                appliedStartIndex = Math.min(startIndex, seg.mStartIndex);
                 break;
             }
 
+            seg.acquireExclusive();
             try {
                 seg.close(true);
-                seg.file().delete();
-            } catch (IOException e) {
-                ex = e;
+            } finally {
+                seg.releaseExclusive();
+            }
+
+            File segFile = seg.file();
+
+            if (!segFile.delete() && segFile.exists()) {
+                // If segment can't be deleted for some reason, try again later instead of
+                // creating a potential segment gap.
                 break;
             }
 
-            appliedStartIndex = endIndex;
             it.remove();
 
             mSegmentCache.remove(seg.cacheKey());
         }
 
-        if (appliedStartIndex > 0) {
-            acquireExclusive();
-            increaseStartIndex(appliedStartIndex);
-            releaseExclusive();
-        }
-
-        if (ex != null) {
-            throw ex;
-        }
+        return full && mSegments.isEmpty();
     }
 
-    // Caller must hold exclusive latch.
-    private boolean increaseStartIndex(long startIndex) {
-        if (startIndex <= mLogStartIndex) {
-            return false;
-        }
-        mLogStartIndex = startIndex = Math.min(startIndex, mLogEndIndex);
-        mLogCommitIndex = Math.max(startIndex, mLogCommitIndex);
-        mLogHighestIndex = Math.max(startIndex, mLogHighestIndex);
-        mLogContigIndex = Math.max(startIndex, mLogContigIndex);
-        return true;
+    @Override
+    public long potentialCommitIndex() {
+        acquireShared();
+        long index = mLogCommitIndex;
+        releaseShared();
+        return index;
     }
 
     @Override
@@ -423,11 +432,18 @@ final class FileTermLog extends Latch implements TermLog {
     // Caller must hold any latch.
     private void doCaptureHighest(LogInfo info) {
         info.mHighestIndex = mLogHighestIndex;
-        info.mCommitIndex = actualCommitIndex();
+        info.mCommitIndex = doAppliableCommitIndex();
+    }
+
+    long appliableCommitIndex() {
+        acquireShared();
+        long commitIndex = doAppliableCommitIndex();
+        releaseShared();
+        return commitIndex;
     }
 
     // Caller must hold any latch.
-    private long actualCommitIndex() {
+    private long doAppliableCommitIndex() {
         return Math.min(mLogCommitIndex, mLogHighestIndex);
     }
 
@@ -440,7 +456,10 @@ final class FileTermLog extends Latch implements TermLog {
                 commitIndex = endIndex;
             }
             mLogCommitIndex = commitIndex;
-            notifyCommitTasks(actualCommitIndex());
+            if (mLogHighestIndex < commitIndex) {
+                mLogHighestIndex = Math.min(commitIndex, mLogContigIndex);
+            }
+            notifyCommitTasks(doAppliableCommitIndex());
             return;
         }
         releaseExclusive();
@@ -457,7 +476,7 @@ final class FileTermLog extends Latch implements TermLog {
         boolean exclusive = false;
         acquireShared();
         while (true) {
-            long commitIndex = actualCommitIndex();
+            long commitIndex = doAppliableCommitIndex();
             if (commitIndex >= index) {
                 release(exclusive);
                 return commitIndex;
@@ -483,7 +502,7 @@ final class FileTermLog extends Latch implements TermLog {
             } else {
                 dwaiter.mCounter = index;
                 dwaiter.mWaiter = waiter;
-                dwaiter.mActualIndex = 0;
+                dwaiter.mAppliableIndex = 0;
             }
 
             mCommitTasks.add(dwaiter);
@@ -502,7 +521,7 @@ final class FileTermLog extends Latch implements TermLog {
             if (Thread.interrupted()) {
                 throw new InterruptedIOException();
             }
-            long commitIndex = dwaiter.mActualIndex;
+            long commitIndex = dwaiter.mAppliableIndex;
             if (commitIndex < 0) {
                 return commitIndex;
             }
@@ -536,7 +555,7 @@ final class FileTermLog extends Latch implements TermLog {
     static class DelayedWaiter extends Delayed {
         final Thread mThread;
         Object mWaiter;
-        volatile long mActualIndex;
+        volatile long mAppliableIndex;
 
         DelayedWaiter(long index, Thread thread, Object waiter) {
             super(index);
@@ -547,7 +566,7 @@ final class FileTermLog extends Latch implements TermLog {
         @Override
         protected void doRun(long index) {
             mWaiter = null;
-            mActualIndex = index;
+            mAppliableIndex = index;
             LockSupport.unpark(mThread);
         }
     }
@@ -580,7 +599,7 @@ final class FileTermLog extends Latch implements TermLog {
     }
 
     private boolean tryUponCommit(Delayed task, boolean exclusive) {
-        long commitIndex = actualCommitIndex();
+        long commitIndex = doAppliableCommitIndex();
         long waitFor = task.mCounter;
 
         if (commitIndex < waitFor) {
@@ -598,25 +617,20 @@ final class FileTermLog extends Latch implements TermLog {
     }
 
     @Override
-    public long finishTerm(long endIndex) throws IOException {
-        long commitIndex;
+    public void finishTerm(long endIndex) {
         List<Delayed> removedTasks;
 
         acquireExclusive();
         try {
-            commitIndex = actualCommitIndex();
+            long commitIndex = mLogCommitIndex;
             if (endIndex < commitIndex && commitIndex > mLogStartIndex) {
-                throw new IllegalArgumentException
+                throw new IllegalStateException
                     ("Cannot finish term below commit index: " + endIndex + " < " + commitIndex);
             }
 
-            if (endIndex == mLogEndIndex) {
-                return commitIndex;
-            }
-
-            if (endIndex > mLogEndIndex) {
-                throw new IllegalStateException
-                    ("Term is already finished: " + endIndex + " > " + mLogEndIndex);
+            if (endIndex >= mLogEndIndex) {
+                mLogEndIndex = endIndex;
+                return;
             }
 
             for (LKey<Segment> key : mSegments) {
@@ -645,6 +659,8 @@ final class FileTermLog extends Latch implements TermLog {
                     SegmentWriter writer = it.next();
                     if (writer.mWriterStartIndex >= endIndex) {
                         it.remove();
+                    } else if (endIndex < writer.mWriterHighestIndex) {
+                        writer.mWriterHighestIndex = endIndex;
                     }
                 }
             }
@@ -665,8 +681,6 @@ final class FileTermLog extends Latch implements TermLog {
         for (Delayed task : removedTasks) {
             task.run(WAIT_TERM_END);
         }
-
-        return commitIndex;
     }
 
     @Override
@@ -865,15 +879,14 @@ final class FileTermLog extends Latch implements TermLog {
     }
 
     /**
-     * @return null if index is at or higher than end index
+     * @return null if index is at or higher than end index, or if segment doesn't exist and is
+     * lower than the commit index
      */
     Segment segmentForWriting(long index) throws IOException {
         LKey<Segment> key = new LKey.Finder<>(index);
 
         acquireExclusive();
         find: try {
-            indexCheck(index);
-
             if (index >= mLogEndIndex) {
                 releaseExclusive();
                 return null;
@@ -887,9 +900,9 @@ final class FileTermLog extends Latch implements TermLog {
                 return startSegment;
             }
 
-            if (index < mLogStartIndex) {
-                throw new IllegalStateException
-                    ("Cannot write lower than start: " + index + " < " + mLogStartIndex);
+            if (index < Math.max(mLogStartIndex, doAppliableCommitIndex())) {
+                // Don't create segments for committed data.
+                return null;
             }
 
             if (mLogClosed) {
@@ -929,26 +942,23 @@ final class FileTermLog extends Latch implements TermLog {
 
         acquireExclusive();
         try {
-            indexCheck(index);
-
             Segment segment = (Segment) mSegments.floor(key); // findLe
             if (segment != null && index < segment.endIndex()) {
                 cRefCountUpdater.getAndIncrement(segment);
                 return segment;
+            }
+
+            long commitIndex = Math.max(mLogStartIndex, doAppliableCommitIndex());
+
+            if (index < commitIndex) {
+                throw new IllegalStateException
+                    ("Index is too low: " + index + " < " + commitIndex);
             }
         } finally {
             releaseExclusive();
         }
 
         return null;
-    }
-
-    // Caller must hold any latch.
-    private void indexCheck(long index) throws IllegalArgumentException {
-        if (index < mLogStartIndex) {
-            throw new IllegalArgumentException
-                ("Index is too low: " + index + " < " + mLogStartIndex);
-        }
     }
 
     /**
@@ -1014,19 +1024,20 @@ final class FileTermLog extends Latch implements TermLog {
             }
 
             applyHighest: {
-                if (endIndex < Long.MAX_VALUE) {
-                    // Term has ended, which is always at a valid highest index. The contiguous
-                    // index can be used as the highest, allowing the commit index to advance.
+                if (contigIndex == endIndex || contigIndex <= commitIndex) {
+                    // The contig index is guaranteed to be a valid highest index (no message
+                    // tearing is possible), so allow the appliable commit index to advance.
                     highestIndex = contigIndex;
-                } else if (highestIndex <= mLogHighestIndex || highestIndex > contigIndex) {
-                    // Cannot apply just yet.
+                } else if (highestIndex > contigIndex) {
+                    // Can't apply higher than what's available.
                     break applyHighest;
                 }
-
-                mLogHighestIndex = highestIndex;
-                doCaptureHighest(writer);
-                notifyCommitTasks(actualCommitIndex());
-                return;
+                if (highestIndex > mLogHighestIndex) {
+                    mLogHighestIndex = highestIndex;
+                    doCaptureHighest(writer);
+                    notifyCommitTasks(doAppliableCommitIndex());
+                    return;
+                }
             }
         }
 
@@ -1055,7 +1066,7 @@ final class FileTermLog extends Latch implements TermLog {
                 return;
             }
             acquireExclusive();
-            commitIndex = actualCommitIndex();
+            commitIndex = doAppliableCommitIndex();
         }
     }
 
@@ -1184,7 +1195,7 @@ final class FileTermLog extends Latch implements TermLog {
         long mWriterHighestIndex;
         Segment mWriterSegment;
 
-        private volatile boolean mClosed;
+        private volatile boolean mWriterClosed;
 
         private SegmentWriter mCacheNext;
         private SegmentWriter mCacheMoreUsed;
@@ -1218,6 +1229,11 @@ final class FileTermLog extends Latch implements TermLog {
         @Override
         public long index() {
             return mWriterIndex;
+        }
+
+        @Override
+        public long commitIndex() {
+            return FileTermLog.this.appliableCommitIndex();
         }
 
         @Override
@@ -1261,7 +1277,7 @@ final class FileTermLog extends Latch implements TermLog {
         }
 
         private Segment segmentForWriting(long index) throws IOException {
-            if (mClosed) {
+            if (mWriterClosed) {
                 throw new IOException("Closed");
             }
             return FileTermLog.this.segmentForWriting(index);
@@ -1284,7 +1300,7 @@ final class FileTermLog extends Latch implements TermLog {
 
         @Override
         public void close() {
-            mClosed = true;
+            mWriterClosed = true;
             FileTermLog.this.release(this, false);
             signalClosed(this);
         }
@@ -1340,7 +1356,7 @@ final class FileTermLog extends Latch implements TermLog {
         private long mReaderContigIndex;
         Segment mReaderSegment;
 
-        private volatile boolean mClosed;
+        private volatile boolean mReaderClosed;
 
         private SegmentReader mCacheNext;
         private SegmentReader mCacheMoreUsed;
@@ -1388,7 +1404,7 @@ final class FileTermLog extends Latch implements TermLog {
                 }
                 commitIndex = waitForCommit(index + 1, -1, this);
                 if (commitIndex < 0) {
-                    if (mClosed) {
+                    if (mReaderClosed) {
                         throw new IOException("Closed");
                     }
                     return EOF;
@@ -1401,7 +1417,30 @@ final class FileTermLog extends Latch implements TermLog {
         }
 
         @Override
-        public int readAny(byte[] buf, int offset, int length) throws IOException {
+        public int tryRead(byte[] buf, int offset, int length) throws IOException {
+            long index = mReaderIndex;
+            long commitIndex = mReaderCommitIndex;
+            long avail = commitIndex - index;
+
+            if (avail <= 0) {
+                FileTermLog.this.acquireShared();
+                commitIndex = doAppliableCommitIndex();
+                long endIndex = mLogEndIndex;
+                FileTermLog.this.releaseShared();
+
+                mReaderCommitIndex = commitIndex;
+                avail = commitIndex - index;
+
+                if (avail <= 0) {
+                    return commitIndex == endIndex ? EOF : 0;
+                }
+            }
+
+            return doRead(index, buf, offset, (int) Math.min(length, avail));
+        }
+
+        @Override
+        public int tryReadAny(byte[] buf, int offset, int length) throws IOException {
             long index = mReaderIndex;
             long contigIndex = mReaderContigIndex;
             long avail = contigIndex - index;
@@ -1459,7 +1498,7 @@ final class FileTermLog extends Latch implements TermLog {
         }
 
         private Segment segmentForReading(long index) throws IOException {
-            if (mClosed) {
+            if (mReaderClosed) {
                 throw new IOException("Closed");
             }
             return FileTermLog.this.segmentForReading(index);
@@ -1472,7 +1511,7 @@ final class FileTermLog extends Latch implements TermLog {
 
         @Override
         public void close() {
-            mClosed = true;
+            mReaderClosed = true;
             FileTermLog.this.release(this, false);
             signalClosed(this);
         }
@@ -1533,7 +1572,7 @@ final class FileTermLog extends Latch implements TermLog {
         // Zero-based reference count.
         volatile int mRefCount;
         private FileIO mFileIO;
-        private boolean mClosed;
+        private boolean mSegmentClosed;
 
         volatile int mDirty;
         Segment mNextDirty;
@@ -1548,7 +1587,19 @@ final class FileTermLog extends Latch implements TermLog {
         }
 
         File file() {
-            return new File(mBase.getPath() + '.' + term() + '.' + mStartIndex);
+            long prevTerm = prevTermAt(mStartIndex);
+            long term = term();
+
+            StringBuilder b = new StringBuilder();
+            b.append(mBase.getPath()).append('.');
+
+            b.append(term).append('.').append(mStartIndex);
+
+            if (prevTerm != term) {
+                b.append('.').append(prevTerm);
+            }
+
+            return new File(b.toString());
         }
 
         @Override
@@ -1616,6 +1667,10 @@ final class FileTermLog extends Latch implements TermLog {
                     io = openForWriting();
                 } finally {
                     releaseExclusive();
+                }
+
+                if (io == null) {
+                    return 0;
                 }
 
                 io.map();
@@ -1689,12 +1744,19 @@ final class FileTermLog extends Latch implements TermLog {
 
         /**
          * Opens or re-opens the segment file if it was closed. Caller must hold exclusive latch.
+         *
+         * @return null if permanently closed
          */
         FileIO openForWriting() throws IOException {
             FileIO io = mFileIO;
 
             if (io == null) {
-                checkClosed();
+                if (mSegmentClosed) {
+                    if (mLogClosed) {
+                        throw new IOException("Closed");
+                    }
+                    return null;
+                }
                 EnumSet<OpenOption> options = EnumSet.of(OpenOption.CLOSE_DONTNEED);
                 int handles = 1;
                 if (mMaxLength > 0) {
@@ -1721,7 +1783,9 @@ final class FileTermLog extends Latch implements TermLog {
             FileIO io = mFileIO;
 
             if (io == null) {
-                checkClosed();
+                if (mSegmentClosed) {
+                    throw new IOException("Closed");
+                }
                 EnumSet<OpenOption> options = EnumSet.of(OpenOption.CLOSE_DONTNEED);
                 int handles = 1;
                 if (mMaxLength > 0) {
@@ -1731,12 +1795,6 @@ final class FileTermLog extends Latch implements TermLog {
             }
 
             return io;
-        }
-
-        private void checkClosed() throws IOException {
-            if (mClosed) {
-                throw new IOException("Closed");
-            }
         }
 
         /**
@@ -1787,10 +1845,9 @@ final class FileTermLog extends Latch implements TermLog {
                 }
 
                 try {
-                    if (mMaxLength == 0) {
+                    if (mMaxLength == 0 || (io = openForWriting()) == null) {
                         return;
                     }
-                    io = openForWriting();
                 } finally {
                     releaseExclusive();
                 }
@@ -1810,8 +1867,8 @@ final class FileTermLog extends Latch implements TermLog {
                 if (maxLength == 0) {
                     close(true);
                     io = null;
-                } else {
-                    io = openForWriting();
+                } else if ((io = openForWriting()) == null) {
+                    return;
                 }
             } finally {
                 releaseExclusive();
@@ -1836,9 +1893,9 @@ final class FileTermLog extends Latch implements TermLog {
             if (mFileIO != null) {
                 mFileIO.close();
                 mFileIO = null;
-                if (permanent) {
-                    mClosed = true;
-                }
+            }
+            if (permanent) {
+                mSegmentClosed = true;
             }
         }
 

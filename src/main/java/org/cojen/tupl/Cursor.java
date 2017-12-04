@@ -17,6 +17,7 @@
 
 package org.cojen.tupl;
 
+import java.io.Closeable;
 import java.io.IOException;
 
 import java.util.Comparator;
@@ -43,7 +44,7 @@ import java.util.Comparator;
  * @author Brian S O'Neill
  * @see View#newCursor View.newCursor
  */
-public interface Cursor {
+public interface Cursor extends ValueAccessor, Closeable {
     /**
      * Empty marker which indicates that value exists but has not been {@link
      * #load loaded}.
@@ -86,8 +87,9 @@ public interface Cursor {
     public byte[] key();
 
     /**
-     * Returns an uncopied reference to the current value, which might be null
-     * or {@link #NOT_LOADED}. Array contents can be safely modified.
+     * Returns an uncopied reference to the current value, which might be null or {@link
+     * #NOT_LOADED}. Array contents can be safely modified. Altering the value via the {@link
+     * ValueAccessor} methods doesn't affect the object returned by this method.
      */
     public byte[] value();
 
@@ -133,6 +135,30 @@ public interface Cursor {
     public default int compareKeyTo(byte[] rkey, int offset, int length) {
         byte[] lkey = key();
         return Utils.compareUnsigned(lkey, 0, lkey.length, rkey, offset, length);
+    }
+
+    /**
+     * Attempt to register this cursor for direct redo operations, which can improve
+     * replication performance when modifying a range of values. Without registration, replicas
+     * must perform a full find operation for each modification made in the range.
+     * Registration isn't useful when using the cursor for single updates.
+     *
+     * <p>The cursor is automatically {@link #unregister unregistered} when {@link #reset
+     * reset}, or when moved to an undefined position, or when moving the cursor
+     * non-incrementally. Methods whose name starts with "next", "previous", "skip", or
+     * "findNearby" are considered to move the cursor incrementally. The use of these methods
+     * generally indicates that registering the cursor might be beneficial.
+     */
+    public default boolean register() throws IOException {
+        return false;
+    }
+
+    /**
+     * Unregisters the cursor for direct redo operations.
+     *
+     * @see #register
+     */
+    public default void unregister() {
     }
 
     /**
@@ -584,28 +610,6 @@ public interface Cursor {
         ViewUtils.transfer(this, target);
     }
 
-    //public int read(LockResult[] result,int start,byte[] b, int off, int len) throws IOException;
-
-    /**
-     * Appends data to the current entry's value, creating it if necessary.
-     *
-     * @param data non-null data to append
-     * @throws NullPointerException if data is null
-     * @throws UnpositionedCursorException if position is undefined at invocation time
-     */
-    //public void append(byte[] data) throws IOException;
-
-    /**
-     * Returns an opened stream at the cursor's current position, or an unopened stream if the
-     * cursor is unpositioned. When using a cursor for opening streams, {@link #autoload
-     * autoload} should be disabled.
-     */
-    /*
-    public default Stream newStream() {
-        throw new UnsupportedOperationException();
-    }
-    */
-
     /**
      * Returns a new independent Cursor, positioned where this one is, and
      * linked to the same transaction. The original and copied Cursor can be
@@ -614,8 +618,15 @@ public interface Cursor {
     public Cursor copy();
 
     /**
-     * Resets Cursor and moves it to an undefined position. The key and value references are
-     * also cleared.
+     * Resets the Cursor and moves it to an undefined position. The key and value references
+     * are set to null.
      */
     public void reset();
+
+    /**
+     * Equivalent to the reset method, which moves the Cursor to an undefined position. The
+     * Cursor is re-opened automatically if positioned again.
+     */
+    @Override
+    public void close();
 }
