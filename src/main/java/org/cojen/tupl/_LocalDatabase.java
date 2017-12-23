@@ -56,6 +56,8 @@ import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import java.util.concurrent.locks.ReentrantLock;
 
+import java.util.function.Consumer;
+
 import static java.lang.System.arraycopy;
 
 import static java.util.Arrays.fill;
@@ -193,6 +195,7 @@ final class _LocalDatabase extends AbstractDatabase {
     private final Map<byte[], _TreeRef> mOpenTrees;
     private final LHashTable.Obj<_TreeRef> mOpenTreesById;
     private final ReferenceQueue<_Tree> mOpenTreesRefQueue;
+    private final Consumer<Index> mIndexOpenListener;
 
     // Map of all loaded nodes.
     private final _Node[] mNodeMapTable;
@@ -287,6 +290,7 @@ final class _LocalDatabase extends AbstractDatabase {
      */
     private _LocalDatabase(DatabaseConfig config, int openMode) throws IOException {
         config.mEventListener = mEventListener = SafeEventListener.makeSafe(config.mEventListener);
+        mIndexOpenListener = config.mIndexOpenListener;
 
         mCustomTxnHandler = config.mTxnHandler;
 
@@ -2870,6 +2874,11 @@ final class _LocalDatabase extends AbstractDatabase {
             _Node root = loadTreeRoot(treeId, rootId);
 
             tree = newTreeInstance(treeId, treeIdBytes, name, root);
+
+            if (mIndexOpenListener != null) {
+                mIndexOpenListener.accept(tree);
+            }
+
             _TreeRef treeRef = new _TreeRef(tree, mOpenTreesRefQueue);
 
             mOpenTreesLatch.acquireExclusive();
