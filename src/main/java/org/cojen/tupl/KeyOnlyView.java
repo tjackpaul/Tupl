@@ -231,4 +231,16 @@ final class KeyOnlyView implements View {
     public boolean isModifyAtomic() {
         return mSource.isModifyAtomic();
     }
+
+    @Override
+    public Object addTrigger(Trigger trigger) {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public void removeTrigger(Object triggerKey) {
+        // FIXME
+        throw null;
+    }
 }

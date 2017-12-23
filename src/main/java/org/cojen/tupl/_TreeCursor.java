@@ -2816,109 +2816,123 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
 
     @Override
     public final void store(byte[] value) throws IOException {
-        final _LocalTransaction txn = mTxn;
+        byte[] key = mKey;
+        ViewUtils.positionCheck(key);
 
-        if (txn == null) {
-            storeAutoCommit(value);
-        } else {
-            byte[] key = mKey;
-            ViewUtils.positionCheck(key);
-            try {
+        try {
+            _LocalTransaction txn = mTxn;
+            if (txn == null) {
+                storeAutoCommit(key, value);
+            } else {
                 if (txn.lockMode() != LockMode.UNSAFE) {
                     txn.lockExclusive(mTree.mId, key, keyHash());
+                    mTree.runTriggers(this, value);
                 }
                 if (storeMode() <= 1) {
                     storeAndRedo(txn, value);
                 } else {
                     storeNoRedo(txn, value);
                 }
-            } catch (Throwable e) {
-                throw handleException(e, false);
             }
+        } catch (Throwable e) {
+            throw handleException(e, false);
         }
     }
     
-    private void storeAutoCommit(byte[] value) throws IOException {
+    /**
+     * @param key not null
+     */
+    private void storeAutoCommit(byte[] key, byte[] value) throws IOException {
+        try {
+            int mode = storeMode();
+
+            if (mode == 1) {
+                // Always undo (and redo).
+                _LocalDatabase db = mTree.mDatabase;
+                _LocalTransaction txn = db.threadLocalTransaction(db.mDurabilityMode.alwaysRedo());
+                txn.lockExclusive(mTree.mId, key, keyHash());
+                mTxn = txn;
+                mTree.runTriggers(this, value);
+                txn.storeCommit(true, this, value);
+                mTxn = null;
+                return;
+            }
+
+            _Tree.TriggerNode tnode = mTree.mLastTrigger;
+
+            if (tnode == null) {
+                final _Locker locker = mTree.lockExclusiveLocal(key, keyHash());
+                try {
+                    if (mode == 0) {
+                        storeAndRedo(null, value);
+                    } else {
+                        storeNoRedo(_LocalTransaction.BOGUS, value);
+                    }
+                } finally {
+                    locker.unlock();
+                }
+            } else {
+                _LocalDatabase db = mTree.mDatabase;
+                _LocalTransaction txn = db.threadLocalTransaction
+                    (mode == 0 ? db.mDurabilityMode : DurabilityMode.NO_REDO);
+                txn.lockExclusive(mTree.mId, key, keyHash());
+                mTxn = txn;
+
+                do {
+                    tnode.mTrigger.store(this, value);
+                    tnode = tnode.mPrev;
+                } while (tnode != null);
+
+                if (txn.mDurabilityMode != DurabilityMode.NO_REDO) {
+                    txn.storeCommit(false, this, value);
+                } else {
+                    storeNoRedo(txn, value);
+                    txn.commit();
+                }
+
+                mTxn = null;
+            }
+        } catch (Throwable e) {
+            _LocalTransaction txn = mTxn;
+            if (txn != null) {
+                mTxn = null;
+                mTree.mDatabase.removeThreadLocalTransaction();
+                txn.reset();
+            }
+            throw e;
+        }
+    }
+
+    @Override
+    public final void commit(byte[] value) throws IOException {
         byte[] key = mKey;
         ViewUtils.positionCheck(key);
 
         try {
-            final _LocalTransaction txn;
-            int mode = storeMode();
-            if (mode == 0) {
-                txn = null;
-            } else if (mode == 1) {
-                // Always undo (and redo).
-                _LocalDatabase db = mTree.mDatabase;
-                txn = db.threadLocalTransaction(db.mDurabilityMode.alwaysRedo());
-                try {
-                    txn.lockExclusive(mTree.mId, key, keyHash());
-                    txn.storeCommit(true, this, value);
-                    return;
-                } catch (Throwable e) {
-                    db.removeThreadLocalTransaction();
-                    txn.reset();
-                    throw e;
-                }
+            _LocalTransaction txn = mTxn;
+            if (txn == null) {
+                storeAutoCommit(key, value);
             } else {
-                // Never redo, but still acquire the lock.
-                txn = _LocalTransaction.BOGUS;
-            }
-
-            final _Locker locker = mTree.lockExclusiveLocal(key, keyHash());
-            try {
-                storeAndRedo(txn, value);
-            } finally {
-                locker.unlock();
+                if (txn.lockMode() != LockMode.UNSAFE) {
+                    txn.lockExclusive(mTree.mId, key, keyHash());
+                    mTree.runTriggers(this, value);
+                }
+                int mode = storeMode();
+                if (mode <= 1 && txn.mDurabilityMode != DurabilityMode.NO_REDO) {
+                    txn.storeCommit(mode != 0, this, value);
+                } else {
+                    storeNoRedo(txn, value);
+                    txn.commit();
+                }
             }
         } catch (Throwable e) {
             throw handleException(e, false);
         }
     }
 
-    @Override
-    public final void commit(byte[] value) throws IOException {
-        final _LocalTransaction txn = mTxn;
-
-        if (txn == null) {
-            storeAutoCommit(value);
-        } else {
-            byte[] key = mKey;
-            ViewUtils.positionCheck(key);
-
-            try {
-                store: {
-                    int mode = storeMode();
-                    if (mode <= 1) storeRedo: {
-                        if (txn.lockMode() != LockMode.UNSAFE) {
-                            txn.lockExclusive(mTree.mId, key, keyHash());
-                            if (txn.mDurabilityMode == DurabilityMode.NO_REDO) {
-                                break storeRedo;
-                            }
-                            txn.storeCommit(mode != 0, this, value);
-                            return;
-                        }
-                        storeAndRedo(txn, value);
-                        break store;
-                    } else {
-                        if (txn.lockMode() != LockMode.UNSAFE) {
-                            txn.lockExclusive(mTree.mId, key, keyHash());
-                        }
-                    }
-
-                    storeNoRedo(txn, value);
-                }
-
-                txn.commit();
-            } catch (Throwable e) {
-                throw handleException(e, false);
-            }
-        }
-    }
-
     /**
      * Atomic find and store operation. Cursor must be in a reset state when this method is
-     * called, and the caller must reset the cursor afterwards.
+     * called, and the caller must reset the cursor afterwards. No triggers are run.
      *
      * @param key must not be null
      */
@@ -3046,7 +3060,8 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
 
     /**
      * Atomic modify operation. If a key is passed in to be found, cursor must already be in a
-     * reset state when this method is called, and the caller must reset the cursor afterwards.
+     * reset state when this method is called, and the caller must reset the cursor
+     * afterwards. No triggers are run.
      *
      * @param key null to use existing key
      * @param oldValue MODIFY_INSERT, MODIFY_REPLACE, MODIFY_UPDATE, else actual old value

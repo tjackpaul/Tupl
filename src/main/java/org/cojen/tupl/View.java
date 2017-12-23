@@ -847,4 +847,26 @@ public interface View {
     public default boolean isModifyAtomic() {
         return false;
     }
+
+    /**
+     * Add a trigger which is invoked before any modifications are made to this view. Triggers
+     * are invoked in stack order: the last added trigger is the first to be invoked. Any
+     * exception thrown from a trigger is propagated up, and no more triggers are run.
+     *
+     * @return an opaque key for removing the trigger
+     * @throws UnsupportedOperationException if view doesn't allow triggers
+     */
+    public default Object addTrigger(Trigger trigger) {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * Remove a trigger using the key which was returned when the trigger was added.
+     *
+     * @throws IllegalStateException if trigger isn't found
+     * @throws UnsupportedOperationException if view doesn't allow triggers
+     */
+    public default void removeTrigger(Object triggerKey) {
+        throw new UnsupportedOperationException();
+    }
 }

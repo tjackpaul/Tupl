@@ -457,6 +457,18 @@ final class TransformedView implements View {
         return mSource.isModifyAtomic();
     }
 
+    @Override
+    public Object addTrigger(Trigger trigger) {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public void removeTrigger(Object triggerKey) {
+        // FIXME
+        throw null;
+    }
+
     private byte[] inverseTransformKey(final byte[] tkey) {
         Utils.keyCheck(tkey);
         return mTransformer.inverseTransformKey(tkey);

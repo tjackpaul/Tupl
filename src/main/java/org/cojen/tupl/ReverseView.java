@@ -218,6 +218,18 @@ final class ReverseView implements View {
         return mSource.isModifyAtomic();
     }
 
+    @Override
+    public Object addTrigger(Trigger trigger) {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public void removeTrigger(Object triggerKey) {
+        // FIXME
+        throw null;
+    }
+
     static byte[] appendZero(byte[] key) {
         return key == null ? null : ViewUtils.appendZero(key);
     }

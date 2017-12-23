@@ -127,6 +127,10 @@
 <dd>
 <div class="block">Add a remote member address for allowing the local member to join the group.</div>
 </dd>
+<dt><span class="memberNameLink"><a href="org/cojen/tupl/View.html#addTrigger-org.cojen.tupl.Trigger-">addTrigger(Trigger)</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></dt>
+<dd>
+<div class="block">Add a trigger which is invoked before any modifications are made to this view.</div>
+</dd>
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/CipherCrypto.html#algorithm--">algorithm()</a></span> - Method in class org.cojen.tupl.<a href="org/cojen/tupl/CipherCrypto.html" title="class in org.cojen.tupl">CipherCrypto</a></dt>
 <dd>
 <div class="block">Returns "AES" by default; override to change the algorithm.</div>
@@ -351,6 +355,10 @@
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/CipherCrypto.html#CipherCrypto-javax.crypto.SecretKey-">CipherCrypto(SecretKey)</a></span> - Constructor for class org.cojen.tupl.<a href="org/cojen/tupl/CipherCrypto.html" title="class in org.cojen.tupl">CipherCrypto</a></dt>
 <dd>
 <div class="block">Construct with an existing key.</div>
+</dd>
+<dt><span class="memberNameLink"><a href="org/cojen/tupl/Trigger.html#clear-org.cojen.tupl.Cursor-long-long-">clear(Cursor, long, long)</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/Trigger.html" title="interface in org.cojen.tupl">Trigger</a></dt>
+<dd>
+<div class="block">Invoked immediately before a <a href="org/cojen/tupl/ValueAccessor.html#valueClear-long-long-"><code>valueClear</code></a> operation.</div>
 </dd>
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/util/LatchCondition.html#clear--">clear()</a></span> - Method in class org.cojen.tupl.util.<a href="org/cojen/tupl/util/LatchCondition.html" title="class in org.cojen.tupl.util">LatchCondition</a></dt>
 <dd>
@@ -2553,6 +2561,10 @@
 <div class="block">Removes the entry associated with the given key, but only if the given value
  matches.</div>
 </dd>
+<dt><span class="memberNameLink"><a href="org/cojen/tupl/View.html#removeTrigger-java.lang.Object-">removeTrigger(Object)</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></dt>
+<dd>
+<div class="block">Remove a trigger using the key which was returned when the trigger was added.</div>
+</dd>
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/Database.html#renameIndex-org.cojen.tupl.Index-byte:A-">renameIndex(Index, byte[])</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/Database.html" title="interface in org.cojen.tupl">Database</a></dt>
 <dd>
 <div class="block">Renames the given index to the one given.</div>
@@ -2850,6 +2862,11 @@
 <div class="block">Stores a value into the current entry, leaving the position
  unchanged.</div>
 </dd>
+<dt><span class="memberNameLink"><a href="org/cojen/tupl/Trigger.html#store-org.cojen.tupl.Cursor-byte:A-">store(Cursor, byte[])</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/Trigger.html" title="interface in org.cojen.tupl">Trigger</a></dt>
+<dd>
+<div class="block">Invoked immediately before a <a href="org/cojen/tupl/Cursor.html#store-byte:A-"><code>store</code></a> or <a href="org/cojen/tupl/Cursor.html#commit-byte:A-"><code>commit</code></a>
+ operation.</div>
+</dd>
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/View.html#store-org.cojen.tupl.Transaction-byte:A-byte:A-">store(Transaction, byte[], byte[])</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></dt>
 <dd>
 <div class="block">Unconditionally associates a value with the given key.</div>
@@ -3047,6 +3064,16 @@
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/Transformer.html#transformValue-org.cojen.tupl.Cursor-byte:A-">transformValue(Cursor, byte[])</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/Transformer.html" title="interface in org.cojen.tupl">Transformer</a></dt>
 <dd>
 <div class="block">Transform or filter out the given value.</div>
+</dd>
+<dt><a href="org/cojen/tupl/Trigger.html" title="interface in org.cojen.tupl"><span class="typeNameLink">Trigger</span></a> - Interface in <a href="org/cojen/tupl/package-summary.html">org.cojen.tupl</a></dt>
+<dd>
+<div class="block">Triggers are invoked immediately before modifications are made, for making observations and
+ for also making additional modifications.</div>
+</dd>
+<dt><span class="memberNameLink"><a href="org/cojen/tupl/Trigger.html#truncate-org.cojen.tupl.Cursor-long-">truncate(Cursor, long)</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/Trigger.html" title="interface in org.cojen.tupl">Trigger</a></dt>
+<dd>
+<div class="block">Invoked immediately before a <a href="org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a>
+ operation which reduces the value length.</div>
 </dd>
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/util/Clutch.html#tryAcquireExclusive--">tryAcquireExclusive()</a></span> - Method in class org.cojen.tupl.util.<a href="org/cojen/tupl/util/Clutch.html" title="class in org.cojen.tupl.util">Clutch</a></dt>
 <dd>&nbsp;</dd>
@@ -3541,6 +3568,12 @@ the order they are declared.</div>
 <dt><span class="memberNameLink"><a href="org/cojen/tupl/repl/StreamReplicator.Writer.html#write-byte:A-int-int-long-">write(byte[], int, int, long)</a></span> - Method in interface org.cojen.tupl.repl.<a href="org/cojen/tupl/repl/StreamReplicator.Writer.html" title="interface in org.cojen.tupl.repl">StreamReplicator.Writer</a></dt>
 <dd>
 <div class="block">Write complete or partial messages to the log.</div>
+</dd>
+<dt><span class="memberNameLink"><a href="org/cojen/tupl/Trigger.html#write-org.cojen.tupl.Cursor-long-byte:A-int-int-">write(Cursor, long, byte[], int, int)</a></span> - Method in interface org.cojen.tupl.<a href="org/cojen/tupl/Trigger.html" title="interface in org.cojen.tupl">Trigger</a></dt>
+<dd>
+<div class="block">Invoked immediately before a <a href="org/cojen/tupl/ValueAccessor.html#valueWrite-long-byte:A-int-int-"><code>valueWrite</code></a> operation, or
+ before a <a href="org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a> operation which extends the
+ value length.</div>
 </dd>
 <dt><a href="org/cojen/tupl/WriteFailureException.html" title="class in org.cojen.tupl"><span class="typeNameLink">WriteFailureException</span></a> - Exception in <a href="org/cojen/tupl/package-summary.html">org.cojen.tupl</a></dt>
 <dd>

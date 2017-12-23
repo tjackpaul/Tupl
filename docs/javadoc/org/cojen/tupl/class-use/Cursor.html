@@ -175,6 +175,22 @@
 </tr>
 <tbody>
 <tr class="altColor">
+<td class="colFirst"><code>default void</code></td>
+<td class="colLast"><span class="typeNameLabel">Trigger.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/Trigger.html#clear-org.cojen.tupl.Cursor-long-long-">clear</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+     long&nbsp;pos,
+     long&nbsp;length)</code>
+<div class="block">Invoked immediately before a <a href="../../../../org/cojen/tupl/ValueAccessor.html#valueClear-long-long-"><code>valueClear</code></a> operation.</div>
+</td>
+</tr>
+<tr class="rowColor">
+<td class="colFirst"><code>void</code></td>
+<td class="colLast"><span class="typeNameLabel">Trigger.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/Trigger.html#store-org.cojen.tupl.Cursor-byte:A-">store</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+     byte[]&nbsp;value)</code>
+<div class="block">Invoked immediately before a <a href="../../../../org/cojen/tupl/Cursor.html#store-byte:A-"><code>store</code></a> or <a href="../../../../org/cojen/tupl/Cursor.html#commit-byte:A-"><code>commit</code></a>
+ operation.</div>
+</td>
+</tr>
+<tr class="altColor">
 <td class="colFirst"><code>default byte[]</code></td>
 <td class="colLast"><span class="typeNameLabel">Transformer.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/Transformer.html#transformKey-org.cojen.tupl.Cursor-">transformKey</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor)</code>
 <div class="block">Transform or filter out the given key.</div>
@@ -185,6 +201,26 @@
 <td class="colLast"><span class="typeNameLabel">Transformer.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/Transformer.html#transformValue-org.cojen.tupl.Cursor-byte:A-">transformValue</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
               byte[]&nbsp;tkey)</code>
 <div class="block">Transform or filter out the given value.</div>
+</td>
+</tr>
+<tr class="altColor">
+<td class="colFirst"><code>default void</code></td>
+<td class="colLast"><span class="typeNameLabel">Trigger.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/Trigger.html#truncate-org.cojen.tupl.Cursor-long-">truncate</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+        long&nbsp;length)</code>
+<div class="block">Invoked immediately before a <a href="../../../../org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a>
+ operation which reduces the value length.</div>
+</td>
+</tr>
+<tr class="rowColor">
+<td class="colFirst"><code>default void</code></td>
+<td class="colLast"><span class="typeNameLabel">Trigger.</span><code><span class="memberNameLink"><a href="../../../../org/cojen/tupl/Trigger.html#write-org.cojen.tupl.Cursor-long-byte:A-int-int-">write</a></span>(<a href="../../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+     long&nbsp;pos,
+     byte[]&nbsp;buf,
+     int&nbsp;off,
+     int&nbsp;len)</code>
+<div class="block">Invoked immediately before a <a href="../../../../org/cojen/tupl/ValueAccessor.html#valueWrite-long-byte:A-int-int-"><code>valueWrite</code></a> operation, or
+ before a <a href="../../../../org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a> operation which extends the
+ value length.</div>
 </td>
 </tr>
 </tbody>

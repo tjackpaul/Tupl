@@ -74,6 +74,38 @@ class ViewUtils {
     }
 
     /**
+     * Copies the current cursor value, extending it to the given length if necessary.
+     */
+    static byte[] copyValue(Cursor c, long length) throws IOException {
+        if (length > Integer.MAX_VALUE) {
+            throw new LargeValueException(length);
+        }
+        int ilength = (int) length;
+
+        byte[] value = c.value();
+        byte[] newValue;
+
+        if (value == null || value == Cursor.NOT_LOADED) {
+            long originalLength = c.valueLength();
+            if (originalLength > Integer.MAX_VALUE) {
+                throw new LargeValueException(originalLength);
+            }
+            if (originalLength < 0) {
+                newValue = new byte[ilength];
+            } else {
+                int ioriginalLength = (int) originalLength;
+                newValue = new byte[ilength <= ioriginalLength ? ioriginalLength : ilength];
+                c.valueRead(0, newValue, 0, ioriginalLength);
+            }
+        } else {
+            newValue = new byte[ilength <= value.length ? value.length : ilength];
+            System.arraycopy(value, 0, newValue, 0, value.length);
+        }
+
+        return newValue;
+    }
+
+    /**
      * Skip implementation which only locks the last key seen, as per the Cursor.skip contract.
      */
     static LockResult skip(Cursor c, long amount, byte[] limitKey, boolean inclusive)

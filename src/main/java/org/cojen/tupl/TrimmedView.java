@@ -223,6 +223,18 @@ final class TrimmedView implements View {
         return mSource.isModifyAtomic();
     }
 
+    @Override
+    public Object addTrigger(Trigger trigger) {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public void removeTrigger(Object triggerKey) {
+        // FIXME
+        throw null;
+    }
+
     byte[] applyPrefix(byte[] key) {
         return applyPrefix(key, 0, key.length);
     }

@@ -28,6 +28,8 @@ import java.nio.charset.StandardCharsets;
 
 import java.util.concurrent.ThreadLocalRandom;
 
+import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+
 import static org.cojen.tupl.DirectPageOps.*;
 import static org.cojen.tupl.Utils.*;
 
@@ -71,6 +73,17 @@ class _Tree implements View, Index {
     // When tree height increases again, the stub is replaced with a real node. Root node must
     // be latched exclusively when modifying this list.
     private _Node mStubTail;
+
+    // Linked stack of Triggers registered to this _Tree.
+    volatile TriggerNode mLastTrigger;
+
+    private static final AtomicReferenceFieldUpdater<_Tree, TriggerNode>
+        cLastTriggerUpdater = AtomicReferenceFieldUpdater.newUpdater
+        (_Tree.class, TriggerNode.class, "mLastTrigger");
+
+    private static final AtomicReferenceFieldUpdater<TriggerNode, TriggerNode>
+        cNextUpdater = AtomicReferenceFieldUpdater.newUpdater
+        (TriggerNode.class, TriggerNode.class, "mNext");
 
     _Tree(_LocalDatabase db, long id, byte[] idBytes, _Node root) {
         mDatabase = db;
@@ -469,6 +482,7 @@ class _Tree implements View, Index {
 
     @Override
     public final void store(Transaction txn, byte[] key, byte[] value) throws IOException {
+        // FIXME: triggers; define cursor store variant which always locks and runs triggers
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
@@ -481,6 +495,7 @@ class _Tree implements View, Index {
 
     @Override
     public final byte[] exchange(Transaction txn, byte[] key, byte[] value) throws IOException {
+        // FIXME: triggers
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
@@ -492,6 +507,7 @@ class _Tree implements View, Index {
 
     @Override
     public final boolean insert(Transaction txn, byte[] key, byte[] value) throws IOException {
+        // FIXME: triggers
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
@@ -504,6 +520,7 @@ class _Tree implements View, Index {
 
     @Override
     public final boolean replace(Transaction txn, byte[] key, byte[] value) throws IOException {
+        // FIXME: triggers
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
@@ -516,6 +533,7 @@ class _Tree implements View, Index {
 
     @Override
     public final boolean update(Transaction txn, byte[] key, byte[] value) throws IOException {
+        // FIXME: triggers
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
@@ -530,6 +548,7 @@ class _Tree implements View, Index {
     public final boolean update(Transaction txn, byte[] key, byte[] oldValue, byte[] newValue)
         throws IOException
     {
+        // FIXME: triggers
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
@@ -643,6 +662,112 @@ class _Tree implements View, Index {
     @Override
     public final boolean isModifyAtomic() {
         return true;
+    }
+
+    @Override
+    public Object addTrigger(Trigger trigger) {
+        // Adopts the same concurrent linked list design as used by _CursorFrame.bind.
+
+        TriggerNode tnode = new TriggerNode(trigger);
+
+        // Next is set to self to indicate that the trigger is the last.
+        tnode.mNext = tnode;
+
+        for (int trials = _CursorFrame.SPIN_LIMIT;;) {
+            TriggerNode last = mLastTrigger;
+            tnode.mPrev = last;
+            if (last == null) {
+                if (cLastTriggerUpdater.compareAndSet(this, null, tnode)) {
+                    return tnode;
+                }
+            } else if (last.mNext == last) {
+                if (cNextUpdater.compareAndSet(last, last, tnode)) {
+                    while (mLastTrigger != last);
+                    mLastTrigger = tnode;
+                    return tnode;
+                }
+            }
+
+            if (--trials < 0) {
+                // Spinning too much due to high contention. Back off a tad.
+                Thread.yield();
+                trials = _CursorFrame.SPIN_LIMIT << 1;
+            }
+        }
+    }
+
+    @Override
+    public void removeTrigger(Object triggerKey) {
+        if (!(triggerKey instanceof TriggerNode)) {
+            throw new IllegalStateException();
+        }
+
+        TriggerNode tnode = (TriggerNode) triggerKey;
+
+        // Adopts the same concurrent linked list design as used by _CursorFrame.unbind.
+
+        for (int trials = _CursorFrame.SPIN_LIMIT;;) {
+            TriggerNode n = tnode.mNext;
+
+            if (n == null) {
+                // Not in the list.
+                throw new IllegalStateException();
+            }
+
+            if (n == tnode) {
+                // Removing the last trigger.
+                if (cNextUpdater.compareAndSet(tnode, n, null)) {
+                    // Update previous trigger to be the new last trigger.
+                    TriggerNode p;
+                    do {
+                        p = tnode.mPrev;
+                    } while (p != null && (p.mNext != tnode ||
+                                           !cNextUpdater.compareAndSet(p, tnode, p)));
+                    // Catch up before replacing the last trigger reference.
+                    while (mLastTrigger != tnode);
+                    mLastTrigger = p;
+                    return;
+                }
+            } else {
+                // Uninstalling an interior or first trigger.
+                if (n.mPrev == tnode && cNextUpdater.compareAndSet(tnode, n, null)) {
+                    // Update next reference chain to skip over the removed trigger.
+                    TriggerNode p;
+                    do {
+                        p = tnode.mPrev;
+                    } while (p != null && (p.mNext != tnode ||
+                                           !cNextUpdater.compareAndSet(p, tnode, n)));
+                    // Update previous reference chain to skip over the removed trigger.
+                    n.mPrev = p;
+                    return;
+                }
+            }
+
+            if (--trials < 0) {
+                // Spinning too much due to high contention. Back off a tad.
+                Thread.yield();
+                trials = _CursorFrame.SPIN_LIMIT << 1;
+            }
+        }
+    }
+
+    void runTriggers(_TreeCursor cursor, byte[] value) throws IOException {
+        TriggerNode tnode = mLastTrigger;
+        while (tnode != null) {
+            tnode.mTrigger.store(cursor, value);
+            tnode = tnode.mPrev;
+        }
+    }
+
+    static final class TriggerNode {
+        final Trigger mTrigger;
+
+        volatile TriggerNode mNext;
+        volatile TriggerNode mPrev;
+
+        TriggerNode(Trigger trigger) {
+            mTrigger = trigger;
+        }
     }
 
     /**

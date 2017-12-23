@@ -214,6 +214,18 @@ abstract class SubView implements View {
         return mSource.isModifyAtomic();
     }
 
+    @Override
+    public Object addTrigger(Trigger trigger) {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public void removeTrigger(Object triggerKey) {
+        // FIXME
+        throw null;
+    }
+
     abstract boolean inRange(byte[] key);
 
     static void prefixCheck(byte[] prefix, int trim) {
