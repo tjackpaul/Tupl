@@ -35,7 +35,7 @@ import java.util.TreeMap;
 
 import java.util.concurrent.TimeUnit;
 
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 import org.cojen.tupl.ext.ReplicationManager;
 import org.cojen.tupl.ext.TransactionHandler;
@@ -77,7 +77,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
     long mCheckpointSizeThreshold;
     long mCheckpointDelayThresholdNanos;
     transient EventListener mEventListener;
-    Consumer<Index> mIndexOpenListener;
+    BiConsumer<Database, Index> mIndexOpenListener;
     boolean mFileSync;
     boolean mReadOnly;
     int mPageSize;
@@ -317,7 +317,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
      * Set a listener which is called when named indexes are opened. Listener implementation
      * must be thread-safe.
      */
-    public DatabaseConfig indexOpenListener(Consumer<Index> listener) {
+    public DatabaseConfig indexOpenListener(BiConsumer<Database, Index> listener) {
         mIndexOpenListener = listener;
         return this;
     }

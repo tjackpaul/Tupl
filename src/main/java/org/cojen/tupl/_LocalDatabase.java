@@ -56,7 +56,7 @@ import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import java.util.concurrent.locks.ReentrantLock;
 
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 import static java.lang.System.arraycopy;
 
@@ -195,7 +195,7 @@ final class _LocalDatabase extends AbstractDatabase {
     private final Map<byte[], _TreeRef> mOpenTrees;
     private final LHashTable.Obj<_TreeRef> mOpenTreesById;
     private final ReferenceQueue<_Tree> mOpenTreesRefQueue;
-    private final Consumer<Index> mIndexOpenListener;
+    private final BiConsumer<Database, Index> mIndexOpenListener;
 
     // Map of all loaded nodes.
     private final _Node[] mNodeMapTable;
@@ -2855,9 +2855,13 @@ final class _LocalDatabase extends AbstractDatabase {
 
         // Use a transaction to ensure that only one thread loads the requested tree. Nothing
         // is written into it.
-        Transaction txn = newNoRedoTransaction();
+        Transaction txn = threadLocalTransaction(DurabilityMode.NO_REDO);
         try {
             txn.lockTimeout(-1, null);
+
+            if (txn.lockCheck(mRegistry.getId(), treeIdBytes) != LockResult.UNOWNED) {
+                throw new LockFailureException("Index open listener self deadlock");
+            }
 
             // Pass the transaction to acquire the lock.
             byte[] rootIdBytes = mRegistry.load(txn, treeIdBytes);
@@ -2876,7 +2880,7 @@ final class _LocalDatabase extends AbstractDatabase {
             tree = newTreeInstance(treeId, treeIdBytes, name, root);
 
             if (mIndexOpenListener != null) {
-                mIndexOpenListener.accept(tree);
+                mIndexOpenListener.accept(this, tree);
             }
 
             _TreeRef treeRef = new _TreeRef(tree, mOpenTreesRefQueue);

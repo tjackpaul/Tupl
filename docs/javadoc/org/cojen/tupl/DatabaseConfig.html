@@ -282,7 +282,7 @@ implements <a href="https://docs.oracle.com/javase/9/docs/api/java/lang/Cloneabl
 </tr>
 <tr id="i19" class="rowColor">
 <td class="colFirst"><code><a href="../../../org/cojen/tupl/DatabaseConfig.html" title="class in org.cojen.tupl">DatabaseConfig</a></code></td>
-<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/DatabaseConfig.html#indexOpenListener-java.util.function.Consumer-">indexOpenListener</a></span>(<a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/Consumer.html?is-external=true" title="class or interface in java.util.function">Consumer</a>&lt;<a href="../../../org/cojen/tupl/Index.html" title="interface in org.cojen.tupl">Index</a>&gt;&nbsp;listener)</code>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/DatabaseConfig.html#indexOpenListener-java.util.function.BiConsumer-">indexOpenListener</a></span>(<a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/BiConsumer.html?is-external=true" title="class or interface in java.util.function">BiConsumer</a>&lt;<a href="../../../org/cojen/tupl/Database.html" title="interface in org.cojen.tupl">Database</a>,<a href="../../../org/cojen/tupl/Index.html" title="interface in org.cojen.tupl">Index</a>&gt;&nbsp;listener)</code>
 <div class="block">Set a listener which is called when named indexes are opened.</div>
 </td>
 </tr>
@@ -627,13 +627,13 @@ implements <a href="https://docs.oracle.com/javase/9/docs/api/java/lang/Cloneabl
  database. Listener implementation must be thread-safe.</div>
 </li>
 </ul>
-<a name="indexOpenListener-java.util.function.Consumer-">
+<a name="indexOpenListener-java.util.function.BiConsumer-">
 <!--   -->
 </a>
 <ul class="blockList">
 <li class="blockList">
 <h4>indexOpenListener</h4>
-<pre>public&nbsp;<a href="../../../org/cojen/tupl/DatabaseConfig.html" title="class in org.cojen.tupl">DatabaseConfig</a>&nbsp;indexOpenListener(<a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/Consumer.html?is-external=true" title="class or interface in java.util.function">Consumer</a>&lt;<a href="../../../org/cojen/tupl/Index.html" title="interface in org.cojen.tupl">Index</a>&gt;&nbsp;listener)</pre>
+<pre>public&nbsp;<a href="../../../org/cojen/tupl/DatabaseConfig.html" title="class in org.cojen.tupl">DatabaseConfig</a>&nbsp;indexOpenListener(<a href="https://docs.oracle.com/javase/9/docs/api/java/util/function/BiConsumer.html?is-external=true" title="class or interface in java.util.function">BiConsumer</a>&lt;<a href="../../../org/cojen/tupl/Database.html" title="interface in org.cojen.tupl">Database</a>,<a href="../../../org/cojen/tupl/Index.html" title="interface in org.cojen.tupl">Index</a>&gt;&nbsp;listener)</pre>
 <div class="block">Set a listener which is called when named indexes are opened. Listener implementation
  must be thread-safe.</div>
 </li>
