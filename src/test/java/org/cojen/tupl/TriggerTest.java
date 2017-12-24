@@ -453,6 +453,81 @@ public class TriggerTest {
         }
     }
 
+    @Test
+    public void valueAccessorNoAuto() throws IOException {
+        valueAccessor(false, false);
+    }
+
+    @Test
+    public void valueAccessorAutoLoad() throws IOException {
+        valueAccessor(true, false);
+    }
+
+    @Test
+    public void valueAccessorAutoCommit() throws IOException {
+        valueAccessor(false, true);
+    }
+
+    @Test
+    public void valueAccessorAutoLoadAutoCommit() throws IOException {
+        valueAccessor(true, true);
+    }
+
+    private void valueAccessor(boolean autoload, boolean autocommit) throws IOException {
+        // Test ValueAccessor methods.
+
+        Index ix = mDb.openIndex("test");
+
+        for (int i=0; i<10; i++) {
+            ix.store(null, ("key-" + i).getBytes(), ("value-" + i).getBytes());
+        }
+
+        Observer obs = new Observer(!autoload);
+        Object tkey = ix.addTrigger(obs);
+
+        Transaction txn = autocommit ? null : mDb.newTransaction();
+        Cursor c = ix.newCursor(txn);
+        c.autoload(autoload);
+
+        c.find("key-0".getBytes());
+        c.valueLength(-1);
+        obs.verifyOneAndClear(c.key(), "value-0".getBytes(), null);
+
+        c.find("key-1".getBytes());
+        c.valueLength(0);
+        obs.verifyOneAndClear(c.key(), "value-1".getBytes(), new byte[0]);
+
+        c.find("key-2".getBytes());
+        c.valueLength(2);
+        obs.verifyOneAndClear(c.key(), "value-2".getBytes(), "va".getBytes());
+
+        c.find("key-3".getBytes());
+        c.valueLength(10);
+        obs.verifyOneAndClear(c.key(), "value-3".getBytes(), "value-3\0\0\0".getBytes());
+
+        c.find("key-4".getBytes());
+        c.valueWrite(2, "xyz".getBytes(), 0, 3);
+        obs.verifyOneAndClear(c.key(), "value-4".getBytes(), "vaxyz-4".getBytes());
+
+        c.find("key-5".getBytes());
+        c.valueWrite(6, "xyz".getBytes(), 0, 3);
+        obs.verifyOneAndClear(c.key(), "value-5".getBytes(), "value-xyz".getBytes());
+
+        c.find("key-6".getBytes());
+        c.valueClear(2, 3);
+        obs.verifyOneAndClear(c.key(), "value-6".getBytes(), "va\0\0\0-6".getBytes());
+
+        c.find("key-7".getBytes());
+        c.valueClear(6, 3);
+        obs.verifyOneAndClear(c.key(), "value-7".getBytes(), "value-\0\0\0".getBytes());
+
+        c.reset();
+
+        if (txn != null) {
+            txn.reset();
+        }
+    }
+
     static class Observed {
         byte[] key;
         LockResult lockResult;
@@ -462,7 +537,7 @@ public class TriggerTest {
         void verify(byte[] key, byte[] oldValue, byte[] newValue) {
             fastAssertArrayEquals(key, this.key);
             fastAssertArrayEquals(oldValue, this.oldValue);
-            assertTrue(newValue == this.newValue);
+            fastAssertArrayEquals(newValue, this.newValue);
         }
     }
 

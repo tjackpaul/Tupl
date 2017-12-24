@@ -4001,7 +4001,7 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
     }
 
     @Override
-    public final void setValueLength(long length) throws IOException {
+    public final void valueLength(long length) throws IOException {
         try {
             if (length <= 0) {
                 store(length == 0 ? EMPTY_BYTES : null);
@@ -4063,25 +4063,30 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
         if (txn == null) {
             _LocalDatabase db = mTree.mDatabase;
 
-            if (mode > 1) {
-                txn = db.threadLocalTransaction(DurabilityMode.NO_REDO);
-            } else {
-                DurabilityMode durabilityMode = db.mDurabilityMode;
-                if (mode != 0) {
-                    txn = db.threadLocalTransaction(durabilityMode.alwaysRedo());
-                } else {
-                    byte[] key = mKey;
-                    ViewUtils.positionCheck(key);
-                    txn = db.threadLocalTransaction(durabilityMode);
-                    txn.mLockMode = LockMode.UNSAFE; // no undo
-                    // Manually lock the key.
-                    txn.lockExclusive(mTree.mId, key, keyHash());
-                }
-            }
-
             try {
-                mTxn = txn;
+                if (mode > 1) {
+                    mTxn = txn = db.threadLocalTransaction(DurabilityMode.NO_REDO);
+                } else {
+                    DurabilityMode durabilityMode = db.mDurabilityMode;
+                    if (mode != 0) {
+                        mTxn = txn = db.threadLocalTransaction(durabilityMode.alwaysRedo());
+                    } else {
+                        byte[] key = mKey;
+                        ViewUtils.positionCheck(key);
+                        mTxn = txn = db.threadLocalTransaction(durabilityMode);
+                        txn.mLockMode = LockMode.UNSAFE; // no undo
+                        // Manually lock the key.
+                        txn.lockExclusive(mTree.mId, key, keyHash());
+
+                        _Tree.TriggerNode tnode = mTree.mLastTrigger;
+                        if (tnode != null) {
+                            runValueModifyTriggers(tnode, op, pos, buf, off, len);
+                        }
+                    }
+                }
+
                 doValueModify(mode, op, pos, buf, off, len);
+
                 txn.commit();
             } catch (Throwable e) {
                 db.removeThreadLocalTransaction();
@@ -4102,6 +4107,11 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
         if (txn.lockMode() != LockMode.UNSAFE) {
             txn.lockExclusive(mTree.mId, key, keyHash());
             undoTxn = txn;
+
+            _Tree.TriggerNode tnode = mTree.mLastTrigger;
+            if (tnode != null) {
+                runValueModifyTriggers(tnode, op, pos, buf, off, len);
+            }
         }
 
         final _CursorFrame leaf = leafExclusive();
@@ -4124,6 +4134,25 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
         } finally {
             shared.release();
         }
+    }
+
+    /**
+     * @param tnode not null
+     */
+    private void runValueModifyTriggers(_Tree.TriggerNode tnode,
+                                        int op, long pos, byte[] buf, int off, long len)
+        throws IOException
+    {
+        do {
+            if (op == _TreeValue.OP_WRITE) {
+                tnode.mTrigger.valueWrite(this, pos, buf, off, (int) len);
+            } else if (op == _TreeValue.OP_CLEAR) {
+                tnode.mTrigger.valueClear(this, pos, len);
+            } else {
+                tnode.mTrigger.valueLength(this, pos);
+            }
+            tnode = tnode.mPrev;
+        } while (tnode != null);
     }
 
     @Override

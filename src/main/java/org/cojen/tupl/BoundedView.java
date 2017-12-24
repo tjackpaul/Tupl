@@ -160,25 +160,25 @@ final class BoundedView extends SubView {
             }
 
             @Override
-            public void truncate(Cursor cursor, long length) throws IOException {
+            public void valueLength(Cursor cursor, long length) throws IOException {
                 if (inRange(cursor.key())) {
-                    trigger.truncate(wrap(cursor), length);
+                    trigger.valueLength(wrap(cursor), length);
                 }
             }
 
             @Override
-            public void write(Cursor cursor, long pos, byte[] buf, int off, int len)
+            public void valueWrite(Cursor cursor, long pos, byte[] buf, int off, int len)
                 throws IOException
             {
                 if (inRange(cursor.key())) {
-                    trigger.write(wrap(cursor), pos, buf, off, len);
+                    trigger.valueWrite(wrap(cursor), pos, buf, off, len);
                 }
             }
 
             @Override
-            public void clear(Cursor cursor, long pos, long length) throws IOException {
+            public void valueClear(Cursor cursor, long pos, long length) throws IOException {
                 if (inRange(cursor.key())) {
-                    trigger.clear(wrap(cursor), pos, length);
+                    trigger.valueClear(wrap(cursor), pos, length);
                 }
             }
 

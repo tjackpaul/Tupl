@@ -46,15 +46,15 @@ public interface Trigger {
     public void store(Cursor cursor, byte[] value) throws IOException;
 
     /**
-     * Invoked immediately before a {@link ValueAccessor#setValueLength setValueLength}
-     * operation which reduces the value length. The default implementation of this method
-     * loads the value and calls the store method.
+     * Invoked immediately before a {@link ValueAccessor#valueLength(long) valueLength}
+     * operation. The default implementation of this method loads the value and calls the store
+     * method.
      *
      * @param cursor positioned cursor, which references the original value (possibly {@link
      * Cursor#NOT_LOADED not loaded}).
-     * @param length reduced value length
+     * @param length new value length
      */
-    public default void truncate(Cursor cursor, long length) throws IOException {
+    public default void valueLength(Cursor cursor, long length) throws IOException {
         byte[] newValue;
 
         if (length == 0) {
@@ -68,7 +68,7 @@ public interface Trigger {
             if (value == null || value == Cursor.NOT_LOADED) {
                 cursor.valueRead(0, newValue, 0, newValue.length);
             } else {
-                System.arraycopy(value, 0, newValue, 0, newValue.length);
+                System.arraycopy(value, 0, newValue, 0, Math.min(value.length, newValue.length));
             }
         }
 
@@ -76,10 +76,8 @@ public interface Trigger {
     }
 
     /**
-     * Invoked immediately before a {@link ValueAccessor#valueWrite valueWrite} operation, or
-     * before a {@link ValueAccessor#setValueLength setValueLength} operation which extends the
-     * value length. The len parameter is zero in the latter case. The default implementation
-     * of this method loads the value and calls the store method.
+     * Invoked immediately before a {@link ValueAccessor#valueWrite valueWrite} operation The
+     * default implementation of this method loads the value and calls the store method.
      *
      * @param cursor positioned cursor, which references the original value (possibly {@link
      * Cursor#NOT_LOADED not loaded}).
@@ -87,7 +85,7 @@ public interface Trigger {
      * @param off buffer start offset
      * @param len amount to write
      */
-    public default void write(Cursor cursor, long pos, byte[] buf, int off, int len)
+    public default void valueWrite(Cursor cursor, long pos, byte[] buf, int off, int len)
         throws IOException
     {
         byte[] newValue = ViewUtils.copyValue(cursor, pos + len);
@@ -104,7 +102,7 @@ public interface Trigger {
      * @param pos start position to clear from
      * @param length amount to clear
      */
-    public default void clear(Cursor cursor, long pos, long length) throws IOException {
+    public default void valueClear(Cursor cursor, long pos, long length) throws IOException {
         byte[] newValue = ViewUtils.copyValue(cursor, pos + length);
         Arrays.fill(newValue, (int) pos, (int) (pos + length), (byte) 0);
         store(cursor, newValue);

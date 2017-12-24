@@ -18,7 +18,7 @@
     catch(err) {
     }
 //-->
-var methods = {"i0":18,"i1":6,"i2":18,"i3":18};
+var methods = {"i0":6,"i1":18,"i2":18,"i3":18};
 var tabs = {65535:["t0","All Methods"],2:["t2","Instance Methods"],4:["t3","Abstract Methods"],16:["t5","Default Methods"]};
 var altColor = "altColor";
 var rowColor = "rowColor";
@@ -131,14 +131,6 @@ var activeTableTab = "activeTableTab";
 <th class="colLast" scope="col">Method and Description</th>
 </tr>
 <tr id="i0" class="altColor">
-<td class="colFirst"><code>default void</code></td>
-<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/Trigger.html#clear-org.cojen.tupl.Cursor-long-long-">clear</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
-     long&nbsp;pos,
-     long&nbsp;length)</code>
-<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueClear-long-long-"><code>valueClear</code></a> operation.</div>
-</td>
-</tr>
-<tr id="i1" class="rowColor">
 <td class="colFirst"><code>void</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/Trigger.html#store-org.cojen.tupl.Cursor-byte:A-">store</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
      byte[]&nbsp;value)</code>
@@ -146,24 +138,31 @@ var activeTableTab = "activeTableTab";
  operation.</div>
 </td>
 </tr>
+<tr id="i1" class="rowColor">
+<td class="colFirst"><code>default void</code></td>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/Trigger.html#valueClear-org.cojen.tupl.Cursor-long-long-">valueClear</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+          long&nbsp;pos,
+          long&nbsp;length)</code>
+<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueClear-long-long-"><code>valueClear</code></a> operation.</div>
+</td>
+</tr>
 <tr id="i2" class="altColor">
 <td class="colFirst"><code>default void</code></td>
-<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/Trigger.html#truncate-org.cojen.tupl.Cursor-long-">truncate</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
-        long&nbsp;length)</code>
-<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a>
- operation which reduces the value length.</div>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/Trigger.html#valueLength-org.cojen.tupl.Cursor-long-">valueLength</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+           long&nbsp;length)</code>
+<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueLength-long-"><code>valueLength</code></a>
+ operation.</div>
 </td>
 </tr>
 <tr id="i3" class="rowColor">
 <td class="colFirst"><code>default void</code></td>
-<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/Trigger.html#write-org.cojen.tupl.Cursor-long-byte:A-int-int-">write</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
-     long&nbsp;pos,
-     byte[]&nbsp;buf,
-     int&nbsp;off,
-     int&nbsp;len)</code>
-<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueWrite-long-byte:A-int-int-"><code>valueWrite</code></a> operation, or
- before a <a href="../../../org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a> operation which extends the
- value length.</div>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/Trigger.html#valueWrite-org.cojen.tupl.Cursor-long-byte:A-int-int-">valueWrite</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+          long&nbsp;pos,
+          byte[]&nbsp;buf,
+          int&nbsp;off,
+          int&nbsp;len)</code>
+<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueWrite-long-byte:A-int-int-"><code>valueWrite</code></a> operation The
+ default implementation of this method loads the value and calls the store method.</div>
 </td>
 </tr>
 </table>
@@ -201,43 +200,41 @@ var activeTableTab = "activeTableTab";
 </dl>
 </li>
 </ul>
-<a name="truncate-org.cojen.tupl.Cursor-long-">
+<a name="valueLength-org.cojen.tupl.Cursor-long-">
 <!--   -->
 </a>
 <ul class="blockList">
 <li class="blockList">
-<h4>truncate</h4>
-<pre>default&nbsp;void&nbsp;truncate(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
-                      long&nbsp;length)
-               throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
-<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a>
- operation which reduces the value length. The default implementation of this method
- loads the value and calls the store method.</div>
+<h4>valueLength</h4>
+<pre>default&nbsp;void&nbsp;valueLength(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+                         long&nbsp;length)
+                  throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
+<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueLength-long-"><code>valueLength</code></a>
+ operation. The default implementation of this method loads the value and calls the store
+ method.</div>
 <dl>
 <dt><span class="paramLabel">Parameters:</span></dt>
 <dd><code>cursor</code> - positioned cursor, which references the original value (possibly <a href="../../../org/cojen/tupl/Cursor.html#NOT_LOADED"><code>not loaded</code></a>).</dd>
-<dd><code>length</code> - reduced value length</dd>
+<dd><code>length</code> - new value length</dd>
 <dt><span class="throwsLabel">Throws:</span></dt>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
 </dl>
 </li>
 </ul>
-<a name="write-org.cojen.tupl.Cursor-long-byte:A-int-int-">
+<a name="valueWrite-org.cojen.tupl.Cursor-long-byte:A-int-int-">
 <!--   -->
 </a>
 <ul class="blockList">
 <li class="blockList">
-<h4>write</h4>
-<pre>default&nbsp;void&nbsp;write(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
-                   long&nbsp;pos,
-                   byte[]&nbsp;buf,
-                   int&nbsp;off,
-                   int&nbsp;len)
-            throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
-<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueWrite-long-byte:A-int-int-"><code>valueWrite</code></a> operation, or
- before a <a href="../../../org/cojen/tupl/ValueAccessor.html#setValueLength-long-"><code>setValueLength</code></a> operation which extends the
- value length. The len parameter is zero in the latter case. The default implementation
- of this method loads the value and calls the store method.</div>
+<h4>valueWrite</h4>
+<pre>default&nbsp;void&nbsp;valueWrite(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+                        long&nbsp;pos,
+                        byte[]&nbsp;buf,
+                        int&nbsp;off,
+                        int&nbsp;len)
+                 throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
+<div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueWrite-long-byte:A-int-int-"><code>valueWrite</code></a> operation The
+ default implementation of this method loads the value and calls the store method.</div>
 <dl>
 <dt><span class="paramLabel">Parameters:</span></dt>
 <dd><code>cursor</code> - positioned cursor, which references the original value (possibly <a href="../../../org/cojen/tupl/Cursor.html#NOT_LOADED"><code>not loaded</code></a>).</dd>
@@ -249,16 +246,16 @@ var activeTableTab = "activeTableTab";
 </dl>
 </li>
 </ul>
-<a name="clear-org.cojen.tupl.Cursor-long-long-">
+<a name="valueClear-org.cojen.tupl.Cursor-long-long-">
 <!--   -->
 </a>
 <ul class="blockListLast">
 <li class="blockList">
-<h4>clear</h4>
-<pre>default&nbsp;void&nbsp;clear(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
-                   long&nbsp;pos,
-                   long&nbsp;length)
-            throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
+<h4>valueClear</h4>
+<pre>default&nbsp;void&nbsp;valueClear(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;cursor,
+                        long&nbsp;pos,
+                        long&nbsp;length)
+                 throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
 <div class="block">Invoked immediately before a <a href="../../../org/cojen/tupl/ValueAccessor.html#valueClear-long-long-"><code>valueClear</code></a> operation. The
  default implementation of this method loads the value and calls the store method.</div>
 <dl>

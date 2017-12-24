@@ -227,20 +227,20 @@ final class ReverseView implements View {
             }
 
             @Override
-            public void truncate(Cursor cursor, long length) throws IOException {
-                trigger.truncate(new ReverseCursor(cursor), length);
+            public void valueLength(Cursor cursor, long length) throws IOException {
+                trigger.valueLength(new ReverseCursor(cursor), length);
             }
 
             @Override
-            public void write(Cursor cursor, long pos, byte[] buf, int off, int len)
+            public void valueWrite(Cursor cursor, long pos, byte[] buf, int off, int len)
                 throws IOException
             {
-                trigger.write(new ReverseCursor(cursor), pos, buf, off, len);
+                trigger.valueWrite(new ReverseCursor(cursor), pos, buf, off, len);
             }
 
             @Override
-            public void clear(Cursor cursor, long pos, long length) throws IOException {
-                trigger.clear(new ReverseCursor(cursor), pos, length);
+            public void valueClear(Cursor cursor, long pos, long length) throws IOException {
+                trigger.valueClear(new ReverseCursor(cursor), pos, length);
             }
         });
     }
