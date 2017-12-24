@@ -52,7 +52,7 @@ public interface Trigger {
      *
      * @param cursor positioned cursor, which references the original value (possibly {@link
      * Cursor#NOT_LOADED not loaded}).
-     * @param length new value length
+     * @param length new value length, always greater than zero
      */
     public default void valueLength(Cursor cursor, long length) throws IOException {
         byte[] newValue;

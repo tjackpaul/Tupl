@@ -225,14 +225,17 @@ final class TrimmedView implements View {
 
     @Override
     public Object addTrigger(Trigger trigger) {
-        // FIXME
-        throw null;
+        return mSource.addTrigger(new WrappedTrigger(trigger) {
+            @Override
+            protected Cursor wrap(Cursor cursor) {
+                return new TrimmedCursor(TrimmedView.this, cursor);
+            }
+        });
     }
 
     @Override
     public void removeTrigger(Object triggerKey) {
-        // FIXME
-        throw null;
+        mSource.removeTrigger(triggerKey);
     }
 
     byte[] applyPrefix(byte[] key) {

@@ -234,13 +234,50 @@ final class KeyOnlyView implements View {
 
     @Override
     public Object addTrigger(Trigger trigger) {
-        // FIXME
-        throw null;
+        return mSource.addTrigger(new Trigger() {
+            @Override
+            public void store(Cursor cursor, byte[] value) throws IOException {
+                if (value == null) {
+                    if (cursor.value() == null) {
+                        // No change.
+                        return;
+                    }
+                } else {
+                    if (cursor.value() != null) {
+                        // No change.
+                        return;
+                    }
+                    value = Cursor.NOT_LOADED;
+                }
+
+                trigger.store(new KeyOnlyCursor(cursor), value);
+            }
+
+            @Override
+            public void valueLength(Cursor cursor, long length) throws IOException {
+                if (cursor.value() == null) {
+                    trigger.store(new KeyOnlyCursor(cursor), Cursor.NOT_LOADED);
+                }
+            }
+
+            @Override
+            public void valueWrite(Cursor cursor, long pos, byte[] buf, int off, int len)
+                throws IOException
+            {
+                if (cursor.value() == null) {
+                    trigger.store(new KeyOnlyCursor(cursor), Cursor.NOT_LOADED);
+                }
+            }
+
+            @Override
+            public void valueClear(Cursor cursor, long pos, long length) throws IOException {
+                // Don't propagate, since a value cannot be created by clearing it.
+            }
+        });
     }
 
     @Override
     public void removeTrigger(Object triggerKey) {
-        // FIXME
-        throw null;
+        mSource.removeTrigger(triggerKey);
     }
 }

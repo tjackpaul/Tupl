@@ -371,6 +371,122 @@ public class TriggerTest {
     }
 
     @Test
+    public void prefixView() throws IOException {
+        // Verify that the trigger is called for in-range keys, and that the cursor passed to
+        // the trigger is also bounded.
+
+        Index ix = mDb.openIndex("test");
+        View view = ix.viewPrefix("key".getBytes(), 1);
+
+        int[] countRef = new int[1];
+
+        Object tkey = view.addTrigger((cursor, value) -> {
+            countRef[0]++;
+            assertNotNull(cursor.link());
+
+            String key = new String(cursor.key());
+            assertEquals("ey", key);
+
+            Cursor copy = cursor.copy();
+            copy.first();
+
+            assertNull(copy.key());
+
+            copy.reset();
+        });
+
+        ix.store(null, "apple".getBytes(), "pie".getBytes());
+        ix.store(null, "key".getBytes(), "value".getBytes());
+        ix.store(null, "stuff".getBytes(), "happens".getBytes());
+
+        assertEquals(1, countRef[0]);
+
+        view.removeTrigger(tkey);
+
+        try {
+            view.removeTrigger(tkey);
+            fail();
+        } catch (IllegalStateException e) {
+        }
+    }
+
+    @Test
+    public void keyView() throws IOException {
+        // Verify that the trigger cannot observe values.
+
+        Index ix = mDb.openIndex("test");
+        View view = ix.viewKeys();
+
+        int[] countRef = new int[1];
+
+        Object tkey = view.addTrigger((cursor, value) -> {
+            countRef[0]++;
+            assertNotNull(cursor.link());
+
+            assertTrue(value == null || value == Cursor.NOT_LOADED);
+
+            Cursor copy = cursor.copy();
+            copy.first();
+
+            value = copy.value();
+            assertTrue(value == null || value == Cursor.NOT_LOADED);
+
+            copy.reset();
+        });
+
+        byte[] key = "hello".getBytes();
+
+        ix.store(null, key, "world".getBytes());
+        assertEquals(1, countRef[0]);
+        ix.store(null, key, "world!!!".getBytes());
+        assertEquals(1, countRef[0]);
+
+        ix.store(null, key, null);
+        assertEquals(2, countRef[0]);
+        ix.store(null, key, null);
+        assertEquals(2, countRef[0]);
+
+        {
+            Cursor c = ix.newAccessor(null, key);
+            c.valueWrite(0, "world".getBytes(), 0, 5);
+            assertEquals(3, countRef[0]);
+            c.reset();
+        }
+
+        {
+            Cursor c = ix.newAccessor(null, key);
+            c.valueWrite(0, "goodbye".getBytes(), 0, 7);
+            assertEquals(3, countRef[0]);
+            c.reset();
+        }
+
+        fastAssertArrayEquals("goodbye".getBytes(), ix.exchange(null, key, null));
+        assertEquals(4, countRef[0]);
+
+        {
+            Cursor c = ix.newAccessor(null, key);
+            c.valueLength(10);
+            assertEquals(5, countRef[0]);
+            c.reset();
+        }
+
+        {
+            Cursor c = ix.newAccessor(null, key);
+            c.valueClear(0, 10);
+            assertEquals(5, countRef[0]);
+            c.reset();
+        }
+
+        view.removeTrigger(tkey);
+
+        try {
+            view.removeTrigger(tkey);
+            fail();
+        } catch (IllegalStateException e) {
+        }
+    }
+
+    @Test
     public void transformedView() throws Exception {
         // Verify that the trigger is called for transformed views, and that the cursor is also
         // transformed.
@@ -525,6 +641,14 @@ public class TriggerTest {
 
         if (txn != null) {
             txn.reset();
+        }
+
+        ix.removeTrigger(tkey);
+
+        try {
+            ix.removeTrigger(tkey);
+            fail();
+        } catch (IllegalStateException e) {
         }
     }
 
