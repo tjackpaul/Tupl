@@ -32,8 +32,8 @@ final class TransformedCursor extends AbstractValueAccessor implements Cursor {
     private final Cursor mSource;
     private final Transformer mTransformer;
 
-    private byte[] mKey;
-    private byte[] mValue;
+    byte[] mKey;
+    byte[] mValue;
 
     TransformedCursor(Cursor source, Transformer transformer) {
         mSource = source;

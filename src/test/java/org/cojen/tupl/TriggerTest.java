@@ -370,6 +370,89 @@ public class TriggerTest {
         }
     }
 
+    @Test
+    public void transformedView() throws Exception {
+        // Verify that the trigger is called for transformed views, and that the cursor is also
+        // transformed.
+
+        Index ix = mDb.openIndex("test");
+
+        View view = ix.viewTransformed(new Transformer() {
+            @Override
+            public byte[] transformValue(byte[] value, byte[] key, byte[] tkey) {
+                // Append "!" to end of value.
+                if (value != null) {
+                    value = Arrays.copyOfRange(value, 0, value.length + 1);
+                    value[value.length - 1] = '!';
+                }
+                return value;
+            }
+
+            @Override
+            public byte[] transformKey(Cursor cursor) {
+                // Key must start with 'k'
+                byte[] key = cursor.key();
+                if (key.length > 0 && key[0] == 'k') {
+                    return key;
+                }
+                return null;
+            }
+        });
+
+        int[] countRef = new int[1];
+
+        Object tkey = view.addTrigger((cursor, value) -> {
+            countRef[0]++;
+            assertNotNull(cursor.link());
+
+            assertEquals('k', cursor.key()[0]);
+            assertEquals('!', value[value.length - 1]);
+
+            if (cursor.value() != null) {
+                assertTrue(cursor.value() == Cursor.NOT_LOADED);
+                cursor.load();
+                assertEquals("world!", new String(cursor.value()));
+            }
+
+            Cursor copy = cursor.copy();
+            copy.first();
+
+            if (countRef[0] == 1) {
+                // First not stored yet.
+                assertNull(copy.key());
+            } else {
+                assertEquals("key-1", new String(copy.key()));
+            }
+
+            copy.reset();
+        });
+
+        ix.store(null, "hello".getBytes(), "world".getBytes());
+        assertEquals(0, countRef[0]);
+
+        ix.store(null, "key-1".getBytes(), "world".getBytes());
+        assertEquals(1, countRef[0]);
+
+        ix.store(null, "key-2".getBytes(), "world".getBytes());
+        assertEquals(2, countRef[0]);
+
+        // With autoload off...
+        Cursor c = ix.newCursor(null);
+        c.autoload(false);
+        c.find("key-2".getBytes());
+        c.store("value".getBytes());
+        c.reset();
+        assertEquals(3, countRef[0]);
+
+        view.removeTrigger(tkey);
+
+        try {
+            view.removeTrigger(tkey);
+            fail();
+        } catch (IllegalStateException e) {
+        }
+    }
+
     static class Observed {
         byte[] key;
         LockResult lockResult;

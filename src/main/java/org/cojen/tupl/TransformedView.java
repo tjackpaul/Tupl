@@ -459,14 +459,47 @@ final class TransformedView implements View {
 
     @Override
     public Object addTrigger(Trigger trigger) {
-        // FIXME
-        throw null;
+        return mSource.addTrigger(new Trigger() {
+            @Override
+            public void store(Cursor cursor, byte[] value) throws IOException {
+                Transformer transformer = mTransformer;
+
+                byte[] tkey = transformer.transformKey(cursor);
+                if (tkey == null) {
+                    return;
+                }
+
+                byte[] key = cursor.key();
+
+                byte[] tvalue = transformer.transformValue(value, key, tkey);
+                if (tvalue == null && value != null) {
+                    return;
+                }
+
+                byte[] tcurrentValue = cursor.value();
+
+                if (tcurrentValue != null && tcurrentValue != Cursor.NOT_LOADED) {
+                    tcurrentValue = transformer.transformValue(tcurrentValue, key, tkey);
+                    if (tcurrentValue == null) {
+                        return;
+                    }
+                }
+
+                TransformedCursor tcursor = new TransformedCursor(cursor, transformer);
+
+                tcursor.mKey = tkey;
+                tcursor.mValue = tcurrentValue;
+
+                trigger.store(tcursor, tvalue);
+            }
+
+            // TODO: Override the default trigger method implementations if possible.
+        });
     }
 
     @Override
     public void removeTrigger(Object triggerKey) {
-        // FIXME
-        throw null;
+        mSource.removeTrigger(triggerKey);
     }
 
     private byte[] inverseTransformKey(final byte[] tkey) {
