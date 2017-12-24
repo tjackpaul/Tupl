@@ -215,15 +215,8 @@ abstract class SubView implements View {
     }
 
     @Override
-    public Object addTrigger(Trigger trigger) {
-        // FIXME
-        throw null;
-    }
-
-    @Override
     public void removeTrigger(Object triggerKey) {
-        // FIXME
-        throw null;
+        mSource.removeTrigger(triggerKey);
     }
 
     abstract boolean inRange(byte[] key);

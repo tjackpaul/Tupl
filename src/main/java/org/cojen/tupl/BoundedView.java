@@ -150,6 +150,45 @@ final class BoundedView extends SubView {
     }
 
     @Override
+    public Object addTrigger(Trigger trigger) {
+        return mSource.addTrigger(new Trigger() {
+            @Override
+            public void store(Cursor cursor, byte[] value) throws IOException {
+                if (inRange(cursor.key())) {
+                    trigger.store(wrap(cursor), value);
+                }
+            }
+
+            @Override
+            public void truncate(Cursor cursor, long length) throws IOException {
+                if (inRange(cursor.key())) {
+                    trigger.truncate(wrap(cursor), length);
+                }
+            }
+
+            @Override
+            public void write(Cursor cursor, long pos, byte[] buf, int off, int len)
+                throws IOException
+            {
+                if (inRange(cursor.key())) {
+                    trigger.write(wrap(cursor), pos, buf, off, len);
+                }
+            }
+
+            @Override
+            public void clear(Cursor cursor, long pos, long length) throws IOException {
+                if (inRange(cursor.key())) {
+                    trigger.clear(wrap(cursor), pos, length);
+                }
+            }
+
+            private BoundedCursor wrap(Cursor cursor) {
+                return new BoundedCursor(BoundedView.this, cursor);
+            }
+        });
+    }
+
+    @Override
     boolean inRange(byte[] key) {
         return startRangeCompare(key) >= 0 && endRangeCompare(key) <= 0;
     }
