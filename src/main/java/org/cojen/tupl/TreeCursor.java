@@ -2818,15 +2818,22 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
     public final void store(byte[] value) throws IOException {
         byte[] key = mKey;
         ViewUtils.positionCheck(key);
+        store(mTree.mLastTrigger, key, value);
+    }
 
+    /**
+     * @param tnode optional
+     * @param key not null
+     */
+    final void store(Tree.TriggerNode tnode, byte[] key, byte[] value) throws IOException {
         try {
             LocalTransaction txn = mTxn;
             if (txn == null) {
-                storeAutoCommit(key, value);
+                storeAutoCommit(tnode, key, value);
             } else {
                 if (txn.lockMode() != LockMode.UNSAFE) {
                     txn.lockExclusive(mTree.mId, key, keyHash());
-                    mTree.runTriggers(this, value);
+                    mTree.runTriggers(tnode, this, value);
                 }
                 if (storeMode() <= 1) {
                     storeAndRedo(txn, value);
@@ -2840,9 +2847,12 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
     }
     
     /**
+     * @param tnode optional
      * @param key not null
      */
-    private void storeAutoCommit(byte[] key, byte[] value) throws IOException {
+    private void storeAutoCommit(Tree.TriggerNode tnode, byte[] key, byte[] value)
+        throws IOException
+    {
         try {
             int mode = storeMode();
 
@@ -2852,13 +2862,11 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 LocalTransaction txn = db.threadLocalTransaction(db.mDurabilityMode.alwaysRedo());
                 txn.lockExclusive(mTree.mId, key, keyHash());
                 mTxn = txn;
-                mTree.runTriggers(this, value);
+                mTree.runTriggers(tnode, this, value);
                 txn.storeCommit(true, this, value);
                 mTxn = null;
                 return;
             }
-
-            Tree.TriggerNode tnode = mTree.mLastTrigger;
 
             if (tnode == null) {
                 final Locker locker = mTree.lockExclusiveLocal(key, keyHash());
@@ -2911,11 +2919,11 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
         try {
             LocalTransaction txn = mTxn;
             if (txn == null) {
-                storeAutoCommit(key, value);
+                storeAutoCommit(mTree.mLastTrigger, key, value);
             } else {
                 if (txn.lockMode() != LockMode.UNSAFE) {
                     txn.lockExclusive(mTree.mId, key, keyHash());
-                    mTree.runTriggers(this, value);
+                    mTree.runTriggers(mTree.mLastTrigger, this, value);
                 }
                 int mode = storeMode();
                 if (mode <= 1 && txn.mDurabilityMode != DurabilityMode.NO_REDO) {

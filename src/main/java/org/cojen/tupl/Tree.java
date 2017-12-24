@@ -22,6 +22,7 @@ import java.io.DataOutput;
 import java.io.InterruptedIOException;
 import java.io.IOException;
 
+import java.util.Arrays;
 import java.util.Comparator;
 
 import java.nio.charset.StandardCharsets;
@@ -482,12 +483,18 @@ class Tree implements View, Index {
 
     @Override
     public final void store(Transaction txn, byte[] key, byte[] value) throws IOException {
-        // FIXME: triggers; define cursor store variant which always locks and runs triggers
         keyCheck(key);
         TreeCursor cursor = newCursor(txn);
         try {
             cursor.mKeyOnly = true;
-            cursor.findAndStore(key, value);
+            TriggerNode tnode = mLastTrigger;
+            if (tnode == null) {
+                // Slight optimization by retaining the leaf node latch, if possible.
+                cursor.findAndStore(key, value);
+            } else {
+                cursor.find(key);
+                cursor.store(tnode, key, value);
+            }
         } finally {
             cursor.reset();
         }
@@ -495,11 +502,18 @@ class Tree implements View, Index {
 
     @Override
     public final byte[] exchange(Transaction txn, byte[] key, byte[] value) throws IOException {
-        // FIXME: triggers
         keyCheck(key);
         TreeCursor cursor = newCursor(txn);
         try {
-            return cursor.findAndStore(key, value);
+            TriggerNode tnode = mLastTrigger;
+            if (tnode == null) {
+                // Slight optimization by retaining the leaf node latch, if possible.
+                return cursor.findAndStore(key, value);
+            }
+            cursor.find(key);
+            byte[] old = cursor.value();
+            cursor.store(tnode, key, value);
+            return old;
         } finally {
             cursor.reset();
         }
@@ -507,12 +521,21 @@ class Tree implements View, Index {
 
     @Override
     public final boolean insert(Transaction txn, byte[] key, byte[] value) throws IOException {
-        // FIXME: triggers
         keyCheck(key);
         TreeCursor cursor = newCursor(txn);
         try {
             cursor.mKeyOnly = true;
-            return cursor.findAndModify(key, TreeCursor.MODIFY_INSERT, value);
+            TriggerNode tnode = mLastTrigger;
+            if (tnode == null) {
+                // Slight optimization by retaining the leaf node latch, if possible.
+                return cursor.findAndModify(key, TreeCursor.MODIFY_INSERT, value);
+            }
+            cursor.find(key);
+            if (cursor.value() != null) {
+                return false;
+            }
+            cursor.store(tnode, key, value);
+            return true;
         } finally {
             cursor.reset();
         }
@@ -520,12 +543,21 @@ class Tree implements View, Index {
 
     @Override
     public final boolean replace(Transaction txn, byte[] key, byte[] value) throws IOException {
-        // FIXME: triggers
         keyCheck(key);
         TreeCursor cursor = newCursor(txn);
         try {
             cursor.mKeyOnly = true;
-            return cursor.findAndModify(key, TreeCursor.MODIFY_REPLACE, value);
+            TriggerNode tnode = mLastTrigger;
+            if (tnode == null) {
+                // Slight optimization by retaining the leaf node latch, if possible.
+                return cursor.findAndModify(key, TreeCursor.MODIFY_REPLACE, value);
+            }
+            cursor.find(key);
+            if (cursor.value() == null) {
+                return false;
+            }
+            cursor.store(tnode, key, value);
+            return true;
         } finally {
             cursor.reset();
         }
@@ -533,12 +565,21 @@ class Tree implements View, Index {
 
     @Override
     public final boolean update(Transaction txn, byte[] key, byte[] value) throws IOException {
-        // FIXME: triggers
         keyCheck(key);
         TreeCursor cursor = newCursor(txn);
         try {
-            // TODO: Optimize by disabling autoload and do an in-place comparison.
-            return cursor.findAndModify(key, TreeCursor.MODIFY_UPDATE, value);
+            TriggerNode tnode = mLastTrigger;
+            if (tnode == null) {
+                // Slight optimization by retaining the leaf node latch, if possible.
+                // TODO: Optimize by disabling autoload and do an in-place comparison.
+                return cursor.findAndModify(key, TreeCursor.MODIFY_UPDATE, value);
+            }
+            cursor.find(key);
+            if (Arrays.equals(cursor.value(), value)) {
+                return false;
+            }
+            cursor.store(tnode, key, value);
+            return true;
         } finally {
             cursor.reset();
         }
@@ -548,11 +589,23 @@ class Tree implements View, Index {
     public final boolean update(Transaction txn, byte[] key, byte[] oldValue, byte[] newValue)
         throws IOException
     {
-        // FIXME: triggers
         keyCheck(key);
         TreeCursor cursor = newCursor(txn);
         try {
-            return cursor.findAndModify(key, oldValue, newValue);
+            TriggerNode tnode = mLastTrigger;
+            if (tnode == null) {
+                // Slight optimization by retaining the leaf node latch, if possible.
+                // TODO: Optimize by disabling autoload and do an in-place comparison.
+                return cursor.findAndModify(key, oldValue, newValue);
+            }
+            cursor.find(key);
+            if (!Arrays.equals(cursor.value(), oldValue)) {
+                return false;
+            }
+            if (oldValue != null || newValue != null) {
+                cursor.store(tnode, key, newValue);
+            }
+            return true;
         } finally {
             cursor.reset();
         }
@@ -751,8 +804,9 @@ class Tree implements View, Index {
         }
     }
 
-    void runTriggers(TreeCursor cursor, byte[] value) throws IOException {
-        TriggerNode tnode = mLastTrigger;
+    static void runTriggers(TriggerNode tnode, TreeCursor cursor, byte[] value)
+        throws IOException
+    {
         while (tnode != null) {
             tnode.mTrigger.store(cursor, value);
             tnode = tnode.mPrev;
