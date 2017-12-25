@@ -476,18 +476,16 @@ final class TransformedView implements View {
                     return;
                 }
 
+                TransformedCursor tcursor = new TransformedCursor(cursor, transformer);
+
+                tcursor.mKey = tkey;
+
                 byte[] tcurrentValue = cursor.value();
 
                 if (tcurrentValue != null && tcurrentValue != Cursor.NOT_LOADED) {
                     tcurrentValue = transformer.transformValue(tcurrentValue, key, tkey);
-                    if (tcurrentValue == null) {
-                        return;
-                    }
                 }
 
-                TransformedCursor tcursor = new TransformedCursor(cursor, transformer);
-
-                tcursor.mKey = tkey;
                 tcursor.mValue = tcurrentValue;
 
                 trigger.store(tcursor, tvalue);
