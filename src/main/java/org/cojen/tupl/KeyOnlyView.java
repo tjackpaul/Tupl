@@ -55,7 +55,9 @@ final class KeyOnlyView implements View {
 
     @Override
     public Cursor newCursor(Transaction txn) {
-        return new KeyOnlyCursor(mSource.newCursor(txn));
+        Cursor source = mSource.newCursor(txn);
+        source.autoload(false);
+        return new KeyOnlyCursor(source);
     }
 
     @Override

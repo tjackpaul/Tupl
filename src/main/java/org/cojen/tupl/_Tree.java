@@ -487,14 +487,7 @@ class _Tree implements View, Index {
         _TreeCursor cursor = newCursor(txn);
         try {
             cursor.mKeyOnly = true;
-            TriggerNode tnode = mLastTrigger;
-            if (tnode == null) {
-                // Slight optimization by retaining the leaf node latch, if possible.
-                cursor.findAndStore(key, value);
-            } else {
-                cursor.find(key);
-                cursor.store(tnode, key, value);
-            }
+            cursor.findAndStore(key, value);
         } finally {
             cursor.reset();
         }
@@ -505,15 +498,7 @@ class _Tree implements View, Index {
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
-            TriggerNode tnode = mLastTrigger;
-            if (tnode == null) {
-                // Slight optimization by retaining the leaf node latch, if possible.
-                return cursor.findAndStore(key, value);
-            }
-            cursor.find(key);
-            byte[] old = cursor.value();
-            cursor.store(tnode, key, value);
-            return old;
+            return cursor.findAndStore(key, value);
         } finally {
             cursor.reset();
         }
@@ -525,17 +510,7 @@ class _Tree implements View, Index {
         _TreeCursor cursor = newCursor(txn);
         try {
             cursor.mKeyOnly = true;
-            TriggerNode tnode = mLastTrigger;
-            if (tnode == null) {
-                // Slight optimization by retaining the leaf node latch, if possible.
-                return cursor.findAndModify(key, _TreeCursor.MODIFY_INSERT, value);
-            }
-            cursor.find(key);
-            if (cursor.value() != null) {
-                return false;
-            }
-            cursor.store(tnode, key, value);
-            return true;
+            return cursor.findAndModify(key, _TreeCursor.MODIFY_INSERT, value);
         } finally {
             cursor.reset();
         }
@@ -547,17 +522,7 @@ class _Tree implements View, Index {
         _TreeCursor cursor = newCursor(txn);
         try {
             cursor.mKeyOnly = true;
-            TriggerNode tnode = mLastTrigger;
-            if (tnode == null) {
-                // Slight optimization by retaining the leaf node latch, if possible.
-                return cursor.findAndModify(key, _TreeCursor.MODIFY_REPLACE, value);
-            }
-            cursor.find(key);
-            if (cursor.value() == null) {
-                return false;
-            }
-            cursor.store(tnode, key, value);
-            return true;
+            return cursor.findAndModify(key, _TreeCursor.MODIFY_REPLACE, value);
         } finally {
             cursor.reset();
         }
@@ -568,18 +533,8 @@ class _Tree implements View, Index {
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
-            TriggerNode tnode = mLastTrigger;
-            if (tnode == null) {
-                // Slight optimization by retaining the leaf node latch, if possible.
-                // TODO: Optimize by disabling autoload and do an in-place comparison.
-                return cursor.findAndModify(key, _TreeCursor.MODIFY_UPDATE, value);
-            }
-            cursor.find(key);
-            if (Arrays.equals(cursor.value(), value)) {
-                return false;
-            }
-            cursor.store(tnode, key, value);
-            return true;
+            // TODO: Optimize by disabling autoload and do an in-place comparison.
+            return cursor.findAndModify(key, _TreeCursor.MODIFY_UPDATE, value);
         } finally {
             cursor.reset();
         }
@@ -592,20 +547,8 @@ class _Tree implements View, Index {
         keyCheck(key);
         _TreeCursor cursor = newCursor(txn);
         try {
-            TriggerNode tnode = mLastTrigger;
-            if (tnode == null) {
-                // Slight optimization by retaining the leaf node latch, if possible.
-                // TODO: Optimize by disabling autoload and do an in-place comparison.
-                return cursor.findAndModify(key, oldValue, newValue);
-            }
-            cursor.find(key);
-            if (!Arrays.equals(cursor.value(), oldValue)) {
-                return false;
-            }
-            if (oldValue != null || newValue != null) {
-                cursor.store(tnode, key, newValue);
-            }
-            return true;
+            // TODO: Optimize by disabling autoload and do an in-place comparison.
+            return cursor.findAndModify(key, oldValue, newValue);
         } finally {
             cursor.reset();
         }
@@ -801,15 +744,6 @@ class _Tree implements View, Index {
                 Thread.yield();
                 trials = _CursorFrame.SPIN_LIMIT << 1;
             }
-        }
-    }
-
-    static void runTriggers(TriggerNode tnode, _TreeCursor cursor, byte[] value)
-        throws IOException
-    {
-        while (tnode != null) {
-            tnode.mTrigger.store(cursor, value);
-            tnode = tnode.mPrev;
         }
     }
 

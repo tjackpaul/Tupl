@@ -65,9 +65,11 @@ public interface Trigger {
             }
             newValue = new byte[(int) length];
             byte[] value = cursor.value();
-            if (value == null || value == Cursor.NOT_LOADED) {
-                cursor.valueRead(0, newValue, 0, newValue.length);
-            } else {
+            if (value == Cursor.NOT_LOADED) {
+                cursor.load();
+                value = cursor.value();
+            }
+            if (value != null) {
                 System.arraycopy(value, 0, newValue, 0, Math.min(value.length, newValue.length));
             }
         }
@@ -88,7 +90,7 @@ public interface Trigger {
     public default void valueWrite(Cursor cursor, long pos, byte[] buf, int off, int len)
         throws IOException
     {
-        byte[] newValue = ViewUtils.copyValue(cursor, pos + len);
+        byte[] newValue = ViewUtils.loadAndCopyValue(cursor, pos + len);
         System.arraycopy(buf, off, newValue, (int) pos, len);
         store(cursor, newValue);
     }
@@ -103,7 +105,7 @@ public interface Trigger {
      * @param length amount to clear
      */
     public default void valueClear(Cursor cursor, long pos, long length) throws IOException {
-        byte[] newValue = ViewUtils.copyValue(cursor, pos + length);
+        byte[] newValue = ViewUtils.loadAndCopyValue(cursor, pos + length);
         Arrays.fill(newValue, (int) pos, (int) (pos + length), (byte) 0);
         store(cursor, newValue);
     }

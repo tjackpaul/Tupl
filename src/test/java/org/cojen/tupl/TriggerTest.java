@@ -130,7 +130,7 @@ public class TriggerTest {
     @Test
     public void basicIndexStoreOps() throws Exception {
         Index ix = mDb.openIndex("test");
-        Observer obs = new Observer(true);
+        Observer obs = new Observer();
         Object tkey = ix.addTrigger(obs);
 
         byte[] k1 = "k1".getBytes();
@@ -527,7 +527,9 @@ public class TriggerTest {
             if (cursor.value() != null) {
                 assertTrue(cursor.value() == Cursor.NOT_LOADED);
                 cursor.load();
-                assertEquals("world!", new String(cursor.value()));
+                if (cursor.value() != null) {
+                    assertEquals("world!", new String(cursor.value()));
+                }
             }
 
             Cursor copy = cursor.copy();
@@ -598,7 +600,7 @@ public class TriggerTest {
             ix.store(null, ("key-" + i).getBytes(), ("value-" + i).getBytes());
         }
 
-        Observer obs = new Observer(!autoload);
+        Observer obs = new Observer();
         Object tkey = ix.addTrigger(obs);
 
         Transaction txn = autocommit ? null : mDb.newTransaction();
@@ -673,16 +675,6 @@ public class TriggerTest {
         int localCounter;
         private static int globalCounter;
 
-        private final boolean mLoad;
-
-        Observer() {
-            this(false);
-        }
-
-        Observer(boolean load) {
-            mLoad = load;
-        }
-
         @Override
         public void store(Cursor cursor, byte[] value) throws IOException {
             localCounter = ++globalCounter;
@@ -692,7 +684,7 @@ public class TriggerTest {
             obs.key = cursor.key();
 
             obs.oldValue = cursor.value();
-            if (obs.oldValue == Cursor.NOT_LOADED && mLoad) {
+            if (obs.oldValue == Cursor.NOT_LOADED) {
                 cursor.load();
                 obs.oldValue = cursor.value();
             }

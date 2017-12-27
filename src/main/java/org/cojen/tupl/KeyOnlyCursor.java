@@ -29,7 +29,6 @@ import java.io.OutputStream;
 final class KeyOnlyCursor extends WrappedCursor<Cursor> {
     KeyOnlyCursor(Cursor source) {
         super(source);
-        source.autoload(false);
     }
 
     @Override
