@@ -2943,12 +2943,10 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
      * @param tnode not null
      */
     private void doRunStoreTriggers(Tree.TriggerNode tnode, byte[] value) throws IOException {
-        if (mValue != Cursor.NOT_LOADED) {
-            // Current value cannot be trusted, so don't let trigger see it.
-            Node node = mLeaf.acquireShared();
-            mValue = mLeaf.mNodePos < 0 ? null : Cursor.NOT_LOADED;
-            node.releaseShared();
-        }
+        // Current value cannot be trusted, so don't let trigger see it.
+        Node node = mLeaf.acquireShared();
+        mValue = mLeaf.mNodePos < 0 ? null : Cursor.NOT_LOADED;
+        node.releaseShared();
 
         doRunTriggers(tnode, value);
     }
@@ -4258,12 +4256,10 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                                           int op, long pos, byte[] buf, int off, long len)
         throws IOException
     {
-        if (mValue != Cursor.NOT_LOADED) {
-            // Current value cannot be trusted, so don't let trigger see it.
-            Node node = mLeaf.acquireShared();
-            mValue = mLeaf.mNodePos < 0 ? null : Cursor.NOT_LOADED;
-            node.releaseShared();
-        }
+        // Current value cannot be trusted, so don't let trigger see it.
+        Node node = mLeaf.acquireShared();
+        mValue = mLeaf.mNodePos < 0 ? null : Cursor.NOT_LOADED;
+        node.releaseShared();
 
         do {
             if (op == TreeValue.OP_WRITE) {
