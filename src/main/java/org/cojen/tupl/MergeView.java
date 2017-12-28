@@ -204,18 +204,6 @@ abstract class MergeView implements View {
         return mFirst.isUnmodifiable() && mSecond.isUnmodifiable();
     }
 
-    @Override
-    public Object addTrigger(Trigger trigger) {
-        // FIXME
-        throw null;
-    }
-
-    @Override
-    public void removeTrigger(Object triggerKey) {
-        // FIXME
-        throw null;
-    }
-
     private static LockResult lockCombine(Transaction txn, LockResult r1, LockResult r2) {
         if (r2.isAcquired()) {
             if (r1 == r2) {
