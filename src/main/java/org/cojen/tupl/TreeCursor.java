@@ -3023,6 +3023,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 LocalTransaction txn = db.threadLocalTransaction(db.mDurabilityMode.alwaysRedo());
                 if (tnode == null) {
                     txn.lockExclusive(mTree.mId, key, hash);
+                    mTxn = txn;
                     result = doFindAndStore(txn, key, value);
                     txn.commit();
                 } else {
@@ -3242,6 +3243,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 LocalTransaction txn = db.threadLocalTransaction(db.mDurabilityMode.alwaysRedo());
                 if (tnode == null) {
                     txn.lockExclusive(mTree.mId, key, hash);
+                    mTxn = txn;
                     result = doFindAndModify(txn, key, oldValue, newValue);
                     txn.commit();
                 } else {
