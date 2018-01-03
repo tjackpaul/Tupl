@@ -1,9 +1,8 @@
 Changelog
 =========
 
-v1.4.0
-------
-
+v1.4.0.1 (2018-01-01)
+--------
 * Added a RAFT-based replication system.
 * Added a ValueAccessor interface which supports very large values (>2Gib), random access,
   appending, truncation, zero-filling, and streams.
