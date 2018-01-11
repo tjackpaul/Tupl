@@ -130,6 +130,15 @@ final class RedoLogApplier implements RedoVisitor {
     }
 
     @Override
+    public boolean txnPrepare(long txnId) throws IOException {
+        LocalTransaction txn = txn(txnId);
+        if (txn != null) {
+            txn.prepareNoRedo();
+        }
+        return true;
+    }
+
+    @Override
     public boolean txnEnter(long txnId) throws IOException {
         LocalTransaction txn = txn(txnId);
         if (txn == null) {

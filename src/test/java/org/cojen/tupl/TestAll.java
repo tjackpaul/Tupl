@@ -117,6 +117,7 @@ public class TestAll {
             ScannerTest.class,
             UpdaterTest.class,
             TriggerTest.class,
+            TxnPrepareTest.class,
         };
 
         String[] names = new String[classes.length];
