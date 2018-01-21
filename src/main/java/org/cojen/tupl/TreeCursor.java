@@ -42,7 +42,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
     LocalTransaction mTxn;
 
     // Top stack frame for cursor, always a leaf except during cleanup.
-    private CursorFrame mLeaf;
+    CursorFrame mLeaf;
 
     byte[] mKey;
     byte[] mValue;
@@ -248,8 +248,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
 
     /**
      * Non-transactionally moves the cursor to the first leaf node, which might be empty or
-     * full of ghosts. Leaf frame remains latched when method returns normally. Key and value
-     * are not loaded.
+     * full of ghosts. Key and value are not loaded.
      */
     final void firstAny() throws IOException {
         reset();
@@ -280,7 +279,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                     mLeaf = frame;
                     return node;
                 }
-                node = latchToChild(node, 0);
+                node = mTree.mDatabase.latchToChild(node, 0);
                 frame = new CursorFrame(frame);
             }
         } catch (Throwable e) {
@@ -348,7 +347,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 // Note: Highest pos is 0 if internal node has no keys.
                 int childPos = node.highestInternalPos();
                 frame.bindOrReposition(node, childPos);
-                node = latchToChild(node, childPos);
+                node = mTree.mDatabase.latchToChild(node, childPos);
 
                 frame = new CursorFrame(frame);
             }
@@ -556,7 +555,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
         }
 
         while (true) {
-            CursorFrame parentFrame = frame.peek();
+            CursorFrame parentFrame = frame.mParentFrame;
 
             if (parentFrame == null) {
                 node.releaseShared();
@@ -628,7 +627,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                     frame.mNodePos = (pos += 2);
 
                     if (frame != mLeaf) {
-                        return toFirstLeaf(new CursorFrame(frame), latchToChild(node, pos));
+                        return toFirstLeaf(new CursorFrame(frame),
+                                           mTree.mDatabase.latchToChild(node, pos));
                     }
 
                     return node;
@@ -648,7 +648,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 parentFrame.mNodePos = (parentPos += 2);
                 // Always create a new cursor frame. See CursorFrame.unbind.
                 frame = new CursorFrame(parentFrame);
-                return toFirstLeaf(frame, latchToChild(parentNode, parentPos));
+                return toFirstLeaf(frame, mTree.mDatabase.latchToChild(parentNode, parentPos));
             }
 
             frame = parentFrame;
@@ -692,7 +692,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
             }
 
             while (true) {
-                CursorFrame parentFrame = frame.peek();
+                CursorFrame parentFrame = frame.mParentFrame;
 
                 if (parentFrame == null) {
                     node.releaseShared();
@@ -791,7 +791,9 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                         // Increment position of internal node.
                         frame.mNodePos = (pos += 2);
 
-                        if (!toFirst(new CursorFrame(frame), latchToChild(node, pos))) {
+                        if (!toFirst(new CursorFrame(frame),
+                                     mTree.mDatabase.latchToChild(node, pos)))
+                        {
                             return null;
                         }
                         frame = mLeaf;
@@ -841,7 +843,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                                     continue;
                                 }
                             } else if (mTree.allowStoredCounts()) {
-                                childNode = latchChildRetainParent(parentNode, parentPos);
+                                childNode = mTree.mDatabase
+                                    .latchChildRetainParent(parentNode, parentPos);
 
                                 // Note: If child node is split, it's also dirty.
                                 if (childNode.mCachedState != Node.CACHED_CLEAN ||
@@ -876,7 +879,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                             }
                         }
 
-                        childNode = latchToChild(parentNode, parentPos);
+                        childNode = mTree.mDatabase.latchToChild(parentNode, parentPos);
                     }
 
                     // Always create a new cursor frame. See CursorFrame.unbind.
@@ -957,7 +960,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
             Node node = frame.mNode;
 
             while (true) {
-                CursorFrame parentFrame = frame.peek();
+                CursorFrame parentFrame = frame.mParentFrame;
 
                 if (parentFrame == null) {
                     if (node.isLeaf()) {
@@ -1070,7 +1073,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                                 count += childCount;
                                 continue;
                             } else if (mTree.allowStoredCounts()) {
-                                childNode = latchChildRetainParent(parentNode, parentPos);
+                                childNode = mTree.mDatabase
+                                    .latchChildRetainParent(parentNode, parentPos);
 
                                 // Note: If child node is split, it's also dirty.
                                 if (childNode.mCachedState != Node.CACHED_CLEAN ||
@@ -1103,7 +1107,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                             }
                         }
 
-                        childNode = latchToChild(parentNode, parentPos);
+                        childNode = mTree.mDatabase.latchToChild(parentNode, parentPos);
                     }
 
                     // When this point is reached, the child node couldn't be skipped and has
@@ -1236,7 +1240,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
         }
 
         while (true) {
-            CursorFrame parentFrame = frame.peek();
+            CursorFrame parentFrame = frame.mParentFrame;
 
             if (parentFrame == null) {
                 node.releaseShared();
@@ -1308,7 +1312,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                     frame.mNodePos = (pos -= 2);
 
                     if (frame != mLeaf) {
-                        return toLast(new CursorFrame(frame), latchToChild(node, pos));
+                        return toLast(new CursorFrame(frame),
+                                      mTree.mDatabase.latchToChild(node, pos));
                     }
 
                     return true;
@@ -1328,7 +1333,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 parentFrame.mNodePos = (parentPos -= 2);
                 // Always create a new cursor frame. See CursorFrame.unbind.
                 frame = new CursorFrame(parentFrame);
-                return toLast(frame, latchToChild(parentNode, parentPos));
+                return toLast(frame, mTree.mDatabase.latchToChild(parentNode, parentPos));
             }
 
             frame = parentFrame;
@@ -1371,7 +1376,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
             }
 
             while (true) {
-                CursorFrame parentFrame = frame.peek();
+                CursorFrame parentFrame = frame.mParentFrame;
 
                 if (parentFrame == null) {
                     node.releaseShared();
@@ -1469,7 +1474,9 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                             }
                         }
 
-                        if (!toLast(new CursorFrame(frame), latchToChild(node, pos))) {
+                        if (!toLast(new CursorFrame(frame),
+                                    mTree.mDatabase.latchToChild(node, pos)))
+                        {
                             return null;
                         }
                         frame = mLeaf;
@@ -1519,7 +1526,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                                     continue;
                                 }
                             } else if (mTree.allowStoredCounts()) {
-                                childNode = latchChildRetainParent(parentNode, parentPos);
+                                childNode = mTree.mDatabase
+                                    .latchChildRetainParent(parentNode, parentPos);
 
                                 // Note: If child node is split, it's also dirty.
                                 if (childNode.mCachedState != Node.CACHED_CLEAN ||
@@ -1554,7 +1562,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                             }
                         }
 
-                        childNode = latchToChild(parentNode, parentPos);
+                        childNode = mTree.mDatabase.latchToChild(parentNode, parentPos);
                     }
 
                     // Always create a new cursor frame. See CursorFrame.unbind.
@@ -2012,7 +2020,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
 
                 frame.mNodePos = pos;
                 try {
-                    node = latchToChild(node, pos);
+                    node = mTree.mDatabase.latchToChild(node, pos);
                 } catch (Throwable e) {
                     throw cleanup(e, frame);
                 }
@@ -2119,7 +2127,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 }
                 frame.bind(node, childPos);
                 try {
-                    node = latchToChild(node, childPos);
+                    node = mTree.mDatabase.latchToChild(node, childPos);
                 } catch (Throwable e) {
                     throw cleanup(e, frame);
                 }
@@ -2160,7 +2168,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 }
 
                 try {
-                    node = latchToChild(selected, selectedPos);
+                    node = mTree.mDatabase.latchToChild(selected, selectedPos);
                 } catch (Throwable e) {
                     throw cleanup(e, frame);
                 }
@@ -2302,7 +2310,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 }
 
                 try {
-                    node = latchToChild(node, pos);
+                    node = mTree.mDatabase.latchToChild(node, pos);
                 } catch (Throwable e) {
                     throw cleanup(e, frame);
                 }
@@ -2503,7 +2511,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 }
 
                 try {
-                    node = latchToChild(node, pos);
+                    node = mTree.mDatabase.latchToChild(node, pos);
                 } catch (Throwable e) {
                     throw cleanup(e, frame);
                 }
@@ -3970,7 +3978,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
             parentNode = parentFrame.acquireExclusive();
         }
 
-        Node next = latchChildRetainParentEx(parentNode, 0, true);
+        Node next = mTree.mDatabase.latchChildRetainParentEx(parentNode, 0, true);
 
         try {
             if (db.markDirty(mTree, next)) {
@@ -4381,6 +4389,114 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
     }
 
     /**
+     * Non-transactionally moves the first entry from the source into the tree, as the highest
+     * overall. No other cursors can be active in the target subtree, and no check is performed
+     * to verify that the entry is the highest and unique. The garbage field of the source node
+     * is untouched.
+     *
+     * Caller must hold shared commit lock and exclusive node latch.
+     */
+    final void appendTransfer(Node source) throws IOException {
+        try {
+            final CursorFrame tleaf = mLeaf;
+            Node tnode = tleaf.acquireExclusive();
+            tnode = notSplitDirty(tleaf);
+
+            try {
+                final /*P*/ byte[] spage = source.mPage;
+                final int sloc = p_ushortGetLE(spage, source.searchVecStart());
+                final int encodedLen = Node.leafEntryLengthAtLoc(spage, sloc);
+
+                final int tpos = tleaf.mNodePos;
+                // Pass a null frame to disable rebalancing. It's not useful here, and it
+                // interferes with the neighboring subtrees.
+                final int tloc = tnode.createLeafEntry(null, mTree, tpos, encodedLen);
+
+                if (tloc < 0) {
+                    tnode.splitLeafAscendingAndCopyEntry(mTree, source, 0, encodedLen, tpos);
+                    tnode = mTree.finishSplit(tleaf, tnode);
+                } else {
+                    p_copy(spage, sloc, tnode.mPage, tloc, encodedLen);
+                }
+
+                // Prepare for next append.
+                tleaf.mNodePos += 2;
+            } finally {
+                tnode.releaseExclusive();
+            }
+
+            source.searchVecStart(source.searchVecStart() + 2);
+        } catch (Throwable e) {
+            throw handleException(e, false);
+        }
+    }
+
+    /**
+     * Non-transactionally moves the first entry from the source into the tree, as the highest
+     * overall. No other cursors can be active in the target subtree, and no check is performed
+     * to verify that the entry is the highest and unique. This source is positioned at the
+     * next entry as a side effect, and nodes are deleted only when empty.
+     */
+    final void appendTransfer(TreeCursor source) throws IOException {
+        final CommitLock.Shared shared = mTree.mDatabase.commitLock().acquireShared();
+        try {
+            final CursorFrame tleaf = mLeaf;
+            Node tnode = tleaf.acquireExclusive();
+            tnode = notSplitDirty(tleaf);
+
+            CursorFrame sleaf = source.mLeaf;
+            Node snode = sleaf.acquireExclusive();
+
+            try {
+                snode = source.notSplitDirty(sleaf);
+                final int spos = sleaf.mNodePos;
+
+                try {
+                    final /*P*/ byte[] spage = snode.mPage;
+                    final int sloc = p_ushortGetLE(spage, snode.searchVecStart() + spos);
+                    final int encodedLen = Node.leafEntryLengthAtLoc(spage, sloc);
+
+                    final int tpos = tleaf.mNodePos;
+                    // Pass a null frame to disable rebalancing. It's not useful here, and it
+                    // interferes with the neighboring subtrees.
+                    final int tloc = tnode.createLeafEntry(null, mTree, tpos, encodedLen);
+
+                    if (tloc < 0) {
+                        tnode.splitLeafAscendingAndCopyEntry(mTree, snode, spos, encodedLen, tpos);
+                        tnode = mTree.finishSplit(tleaf, tnode);
+                    } else {
+                        p_copy(spage, sloc, tnode.mPage, tloc, encodedLen);
+                    }
+
+                    // Prepare for next append.
+                    tleaf.mNodePos += 2;
+
+                    snode.finishDeleteLeafEntry(spos, encodedLen);
+                    snode.postDelete(spos, null);
+                } catch (Throwable e) {
+                    snode.releaseExclusive();
+                    throw e;
+                }
+            } finally {
+                tnode.releaseExclusive();
+            }
+
+            if (snode.hasKeys()) {
+                snode.downgrade();
+            } else {
+                source.mergeLeaf(sleaf, snode);
+                sleaf = source.leafSharedNotSplit();
+            }
+
+            source.next(LocalTransaction.BOGUS, sleaf);
+        } catch (Throwable e) {
+            throw handleException(e, false);
+        } finally {
+            shared.release();
+        }
+    }
+
+    /**
      * @param txn non-null
      */
     private void doUnregister(LocalTransaction txn, long cursorId) {
@@ -4643,7 +4759,7 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 if (extremity == Node.HIGH_EXTREMITY) {
                     pos = node.highestInternalPos();
                 }
-                node = latchToChild(node, pos);
+                node = mTree.mDatabase.latchToChild(node, pos);
             }
         } finally {
             node.releaseShared();
@@ -5051,7 +5167,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                     leftAvail = -1;
                 } else {
                     try {
-                        leftNode = latchChildRetainParentEx(parentNode, pos - 2, false);
+                        leftNode = mTree.mDatabase
+                            .latchChildRetainParentEx(parentNode, pos - 2, false);
                     } catch (Throwable e) {
                         node.releaseExclusive();
                         throw e;
@@ -5088,7 +5205,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                     rightAvail = -1;
                 } else {
                     try {
-                        rightNode = latchChildRetainParentEx(parentNode, pos + 2, false);
+                        rightNode = mTree.mDatabase
+                            .latchChildRetainParentEx(parentNode, pos + 2, false);
                     } catch (Throwable e) {
                         if (leftNode != null) {
                             leftNode.releaseExclusive();
@@ -5257,7 +5375,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 leftNode = null;
             } else {
                 try {
-                    leftNode = latchChildRetainParentEx(parentNode, pos - 2, false);
+                    leftNode = mTree.mDatabase
+                        .latchChildRetainParentEx(parentNode, pos - 2, false);
                 } catch (Throwable e) {
                     node.releaseExclusive();
                     throw e;
@@ -5276,7 +5395,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
                 rightNode = null;
             } else {
                 try {
-                    rightNode = latchChildRetainParentEx(parentNode, pos + 2, false);
+                    rightNode = mTree.mDatabase
+                        .latchChildRetainParentEx(parentNode, pos + 2, false);
                 } catch (Throwable e) {
                     if (leftNode != null) {
                         leftNode.releaseExclusive();
@@ -5386,160 +5506,5 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
         /*P*/ // |
         /*P*/ // return mTree.pageSize();
         /*P*/ // ]
-    }
-
-    /**
-     * With parent held shared, returns child with shared latch held, releasing the parent
-     * latch. If an exception is thrown, parent and child latches are always released.
-     *
-     * @return child node, possibly split
-     */
-    private Node latchToChild(Node parent, int childPos) throws IOException {
-        return latchChild(parent, childPos, Node.OPTION_PARENT_RELEASE_SHARED);
-    }
-
-    /**
-     * With parent held shared, returns child with shared latch held, retaining the parent
-     * latch. If an exception is thrown, parent and child latches are always released.
-     *
-     * @return child node, possibly split
-     */
-    private Node latchChildRetainParent(Node parent, int childPos) throws IOException {
-        return latchChild(parent, childPos, 0);
-    }
-
-    /**
-     * With parent held shared, returns child with shared latch held. If an exception is
-     * thrown, parent and child latches are always released.
-     *
-     * @param option Node.OPTION_PARENT_RELEASE_SHARED or 0 to retain latch
-     * @return child node, possibly split
-     */
-    private Node latchChild(Node parent, int childPos, int option) throws IOException {
-        long childId = parent.retrieveChildRefId(childPos);
-        Node childNode = mTree.mDatabase.nodeMapGetShared(childId);
-
-        tryFind: if (childNode != null) {
-            checkChild: {
-                evictChild: if (childNode.mCachedState != Node.CACHED_CLEAN
-                                && parent.mCachedState == Node.CACHED_CLEAN
-                                // Must be a valid parent -- not a stub from Node.rootDelete.
-                                && parent.mId > 1)
-                {
-                    // Parent was evicted before child. Evict child now and mark as clean. If
-                    // this isn't done, the notSplitDirty method will short-circuit and not
-                    // ensure that all the parent nodes are dirty. The splitting and merging
-                    // code assumes that all nodes referenced by the cursor are dirty. The
-                    // short-circuit check could be skipped, but then every change would
-                    // require a full latch up the tree. Another option is to remark the parent
-                    // as dirty, but this is dodgy and also requires a full latch up the tree.
-                    // Parent-before-child eviction is infrequent, and so simple is better.
-
-                    if (!childNode.tryUpgrade()) {
-                        childNode.releaseShared();
-                        childNode = mTree.mDatabase.nodeMapGetExclusive(childId);
-                        if (childNode == null) {
-                            break tryFind;
-                        }
-                        if (childNode.mCachedState == Node.CACHED_CLEAN) {
-                            // Child state which was checked earlier changed when its latch was
-                            // released, and now it shoudn't be evicted.
-                            childNode.downgrade();
-                            break evictChild;
-                        }
-                    }
-
-                    if (option == Node.OPTION_PARENT_RELEASE_SHARED) {
-                        parent.releaseShared();
-                    }
-
-                    try {
-                        childNode.write(mTree.mDatabase.mPageDb);
-                    } catch (Throwable e) {
-                        childNode.releaseExclusive();
-                        if (option == 0) {
-                            // Release due to exception.
-                            parent.releaseShared();
-                        }
-                        throw e;
-                    }
-
-                    childNode.mCachedState = Node.CACHED_CLEAN;
-                    childNode.downgrade();
-                    break checkChild;
-                }
-
-                if (option == Node.OPTION_PARENT_RELEASE_SHARED) {
-                    parent.releaseShared();
-                }
-            }
-
-            childNode.used(ThreadLocalRandom.current());
-            return childNode;
-        }
-
-        return parent.loadChild(mTree.mDatabase, childId, option);
-    }
-
-    /**
-     * Variant of latchChildRetainParent which uses exclusive latches. With parent held
-     * exclusively, returns child with exclusive latch held, retaining the parent latch. If an
-     * exception is thrown, parent and child latches are always released.
-     *
-     * @param required pass false to allow null to be returned when child isn't immediately
-     * latchable; passing false still permits the child to be loaded if necessary
-     * @return child node, possibly split
-     */
-    private Node latchChildRetainParentEx(Node parent, int childPos, boolean required)
-        throws IOException
-    {
-        long childId = parent.retrieveChildRefId(childPos);
-
-        Node childNode;
-        while (true) {
-            childNode = mTree.mDatabase.nodeMapGet(childId);
-
-            if (childNode != null) {
-                if (required) {
-                    childNode.acquireExclusive();
-                } else if (!childNode.tryAcquireExclusive()) {
-                    return null;
-                }
-                if (childId == childNode.mId) {
-                    break;
-                }
-                childNode.releaseExclusive();
-                continue;
-            }
-
-            return parent.loadChild(mTree.mDatabase, childId, Node.OPTION_CHILD_ACQUIRE_EXCLUSIVE);
-        }
-
-        if (childNode.mCachedState != Node.CACHED_CLEAN
-            && parent.mCachedState == Node.CACHED_CLEAN
-            // Must be a valid parent -- not a stub from Node.rootDelete.
-            && parent.mId > 1)
-        {
-            // Parent was evicted before child. Evict child now and mark as clean. If
-            // this isn't done, the notSplitDirty method will short-circuit and not
-            // ensure that all the parent nodes are dirty. The splitting and merging
-            // code assumes that all nodes referenced by the cursor are dirty. The
-            // short-circuit check could be skipped, but then every change would
-            // require a full latch up the tree. Another option is to remark the parent
-            // as dirty, but this is dodgy and also requires a full latch up the tree.
-            // Parent-before-child eviction is infrequent, and so simple is better.
-            try {
-                childNode.write(mTree.mDatabase.mPageDb);
-            } catch (Throwable e) {
-                childNode.releaseExclusive();
-                // Release due to exception.
-                parent.releaseExclusive();
-                throw e;
-            }
-            childNode.mCachedState = Node.CACHED_CLEAN;
-        }
-
-        childNode.used(ThreadLocalRandom.current());
-        return childNode;
     }
 }
