@@ -3527,7 +3527,7 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
     }
 
     /**
-     * Called after delete or store, to write to redo lock and possibly wait for a commit.
+     * Called after delete or store, to write to redo log and possibly wait for a commit.
      *
      * @param txn can be null
      * @param shared held commit lock, which is always released by this method
@@ -3539,7 +3539,7 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
         long commitPos;
         try {
             if (txn == null) {
-                commitPos = mTree.redoStore(mKey, value);
+                commitPos = mTree.redoStoreNullTxn(mKey, value);
             } else if (txn.mDurabilityMode == DurabilityMode.NO_REDO) {
                 return;
             } else if (txn.lockMode() != LockMode.UNSAFE) {
@@ -3554,7 +3554,7 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
                 }
                 return;
             } else {
-                commitPos = mTree.redoStoreNoLock(mKey, value);
+                commitPos = mTree.redoStoreNoLock(mKey, value, txn.mDurabilityMode);
             }
         } finally {
             shared.release();
@@ -4425,7 +4425,16 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
                 tnode.releaseExclusive();
             }
 
-            source.searchVecStart(source.searchVecStart() + 2);
+            int searchVecStart = source.searchVecStart();
+            int searchVecEnd = source.searchVecEnd();
+
+            if (searchVecStart == searchVecEnd) {
+                // After removing the last entry, adjust the end pointer instead of the start
+                // pointer. If the start pointer was incremented, it could go out of bounds.
+                source.searchVecEnd(searchVecEnd - 2);
+            } else {
+                source.searchVecStart(searchVecStart + 2);
+            }
         } catch (Throwable e) {
             throw handleException(e, false);
         }
