@@ -1,26 +1,32 @@
 /*
- *  Copyright 2013-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
 
+import java.io.InputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+
+import java.util.Comparator;
 
 /**
  * Abstract wrapper around another cursor. Subclass must implement the {@link #copy copy}
- * method, and it should also override the {@link #store store} and method.
+ * method, and it should also override the {@link #store store} and {@link #commit commit}
+ * methods.
  *
  * @author Brian S O'Neill
  */
@@ -35,8 +41,88 @@ public abstract class WrappedCursor<C extends Cursor> implements Cursor {
      * {@inheritDoc}
      */
     @Override
+    public long valueLength() throws IOException {
+        return source.valueLength();
+    }
+
+    /**
+     * Always throws UnmodifiableViewException by default.
+     */
+    @Override
+    public void valueLength(long length) throws IOException {
+        throw new UnmodifiableViewException();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int valueRead(long pos, byte[] buf, int off, int len) throws IOException {
+        return source.valueRead(pos, buf, off, len);
+    }
+
+    /**
+     * Always throws UnmodifiableViewException by default.
+     */
+    @Override
+    public void valueWrite(long pos, byte[] buf, int off, int len) throws IOException {
+        throw new UnmodifiableViewException();
+    }
+
+    /**
+     * Always throws UnmodifiableViewException by default.
+     */
+    @Override
+    public void valueClear(long pos, long length) throws IOException {
+        throw new UnmodifiableViewException();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public InputStream newValueInputStream(long pos) throws IOException {
+        return source.newValueInputStream(pos);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public InputStream newValueInputStream(long pos, int bufferSize) throws IOException {
+        return source.newValueInputStream(pos, bufferSize);
+    }
+
+    /**
+     * Always throws UnmodifiableViewException by default.
+     */
+    @Override
+    public OutputStream newValueOutputStream(long pos) throws IOException {
+        throw new UnmodifiableViewException();
+    }
+
+    /**
+     * Always throws UnmodifiableViewException by default.
+     */
+    @Override
+    public OutputStream newValueOutputStream(long pos, int bufferSize) throws IOException {
+        throw new UnmodifiableViewException();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public Ordering getOrdering() {
         return source.getOrdering();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Comparator<byte[]> getComparator() {
+        return source.getComparator();
     }
 
     /**
@@ -101,6 +187,22 @@ public abstract class WrappedCursor<C extends Cursor> implements Cursor {
     @Override
     public int compareKeyTo(byte[] rkey, int offset, int length) {
         return source.compareKeyTo(rkey, offset, length);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean register() throws IOException {
+        return source.register();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void unregister() {
+        source.unregister();
     }
 
     /**
@@ -235,6 +337,38 @@ public abstract class WrappedCursor<C extends Cursor> implements Cursor {
      * {@inheritDoc}
      */
     @Override
+    public LockResult findNearbyGe(byte[] key) throws IOException {
+        return source.findNearbyGe(key);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public LockResult findNearbyGt(byte[] key) throws IOException {
+        return source.findNearbyGt(key);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public LockResult findNearbyLe(byte[] key) throws IOException {
+        return source.findNearbyLe(key);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public LockResult findNearbyLt(byte[] key) throws IOException {
+        return source.findNearbyLt(key);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public LockResult random(byte[] lowKey, byte[] highKey) throws IOException {
         return source.random(lowKey, highKey);
     }
@@ -272,20 +406,18 @@ public abstract class WrappedCursor<C extends Cursor> implements Cursor {
     }
 
     /**
-     * Returns an unmodifiable stream by default.
-     */
-    /*
-    @Override
-    public Stream newStream() {
-        return new UnmodifiableStream(source.newStream());
-    }
-    */
-
-    /**
      * {@inheritDoc}
      */
     @Override
     public void reset() {
         source.reset();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close() {
+        source.close();
     }
 }

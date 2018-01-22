@@ -1,22 +1,25 @@
 /*
- *  Copyright 2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
 
 import java.io.IOException;
+
+import java.util.Comparator;
 
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -25,7 +28,7 @@ import java.util.concurrent.ThreadLocalRandom;
  *
  * @author Brian S O'Neill
  */
-final class TransformedCursor implements Cursor {
+final class TransformedCursor extends AbstractValueAccessor implements Cursor {
     private final Cursor mSource;
     private final Transformer mTransformer;
 
@@ -39,7 +42,12 @@ final class TransformedCursor implements Cursor {
 
     @Override
     public Ordering getOrdering() {
-        return mSource.getOrdering();
+        return mTransformer.transformedOrdering(mSource.getOrdering());
+    }
+
+    @Override
+    public Comparator<byte[]> getComparator() {
+        return mTransformer.transformedComparator(mSource.getComparator());
     }
 
     @Override
@@ -88,6 +96,16 @@ final class TransformedCursor implements Cursor {
     }
 
     @Override
+    public boolean register() throws IOException {
+        return mSource.register();
+    }
+
+    @Override
+    public void unregister() {
+        mSource.unregister();
+    }
+
+    @Override
     public LockResult first() throws IOException {
         LockResult result;
         try {
@@ -113,7 +131,7 @@ final class TransformedCursor implements Cursor {
 
     @Override
     public LockResult skip(long amount) throws IOException {
-        return ViewUtils.skipWithLocks(this, amount);
+        return amount == 0 ? mSource.skip(0) : ViewUtils.skipWithLocks(this, amount);
     }
 
     @Override
@@ -281,14 +299,15 @@ final class TransformedCursor implements Cursor {
 
     @Override
     public LockResult find(final byte[] tkey) throws IOException {
+        mKey = tkey;
         final byte[] key = inverseTransformKey(tkey);
         if (key == null) {
-            reset();
+            mValue = null;
+            mSource.reset();
             return LockResult.UNOWNED;
         }
-        mKey = tkey;
         mValue = NOT_LOADED;
-        return transformCurrent(mSource.find(key), key, tkey);
+        return transformCurrent(mSource.find(key), tkey);
     }
 
     @Override
@@ -385,14 +404,15 @@ final class TransformedCursor implements Cursor {
 
     @Override
     public LockResult findNearby(final byte[] tkey) throws IOException {
+        mKey = tkey;
         final byte[] key = inverseTransformKey(tkey);
         if (key == null) {
-            reset();
+            mValue = null;
+            mSource.reset();
             return LockResult.UNOWNED;
         }
-        mKey = tkey;
         mValue = NOT_LOADED;
-        return transformCurrent(mSource.findNearby(key), key, tkey);
+        return transformCurrent(mSource.findNearby(key), tkey);
     }
 
     @Override
@@ -451,6 +471,9 @@ final class TransformedCursor implements Cursor {
 
     @Override
     public LockResult lock() throws IOException {
+        if (mKey != null && mSource.key() == null) {
+            throw TransformedView.fail();
+        }
         return mSource.lock();
     }
 
@@ -458,10 +481,11 @@ final class TransformedCursor implements Cursor {
     public LockResult load() throws IOException {
         final byte[] tkey = mKey;
         ViewUtils.positionCheck(tkey);
-        mKey = tkey;
+        if (mSource.key() == null) {
+            throw TransformedView.fail();
+        }
         mValue = NOT_LOADED;
-        final Cursor c = mSource;
-        return transformCurrent(c.load(), c.key(), tkey);
+        return transformCurrent(mSource.load(), tkey);
     }
 
     @Override
@@ -470,7 +494,9 @@ final class TransformedCursor implements Cursor {
         ViewUtils.positionCheck(tkey);
         final Cursor c = mSource;
         final byte[] key = c.key();
-        ViewUtils.positionCheck(key);
+        if (key == null) {
+            throw TransformedView.fail();
+        }
         c.store(mTransformer.inverseTransformValue(tvalue, key, tkey));
         mValue = tvalue;
     }
@@ -481,28 +507,18 @@ final class TransformedCursor implements Cursor {
         ViewUtils.positionCheck(tkey);
         final Cursor c = mSource;
         final byte[] key = c.key();
-        ViewUtils.positionCheck(key);
+        if (key == null) {
+            throw TransformedView.fail();
+        }
         c.commit(mTransformer.inverseTransformValue(tvalue, key, tkey));
         mValue = tvalue;
     }
-
-    /*
-    @Override
-    public Stream newStream() {
-        Cursor c = mSource;
-        if (mKey == null && c.key() != null) {
-            c = c.copy();
-            c.reset();
-        }
-        return new TransformedStream(c.newStream(), mTransformer);
-    }
-    */
 
     @Override
     public Cursor copy() {
         TransformedCursor copy = new TransformedCursor(mSource.copy(), mTransformer);
         copy.mKey = Utils.cloneArray(mKey);
-        copy.mValue = Utils.cloneArray(mValue);
+        copy.mValue = ViewUtils.copyValue(mValue);
         return copy;
     }
 
@@ -513,6 +529,46 @@ final class TransformedCursor implements Cursor {
         mSource.reset();
     }
 
+    @Override
+    public void close() {
+        reset();
+    }
+
+    @Override
+    public long valueLength() throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void valueLength(long length) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    int doValueRead(long pos, byte[] buf, int off, int len) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    void doValueWrite(long pos, byte[] buf, int off, int len) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    void doValueClear(long pos, long length) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    int valueStreamBufferSize(int bufferSize) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    void valueCheckOpen() {
+        throw new UnsupportedOperationException();
+    }
+
     private byte[] inverseTransformKey(final byte[] tkey) {
         Utils.keyCheck(tkey);
         return mTransformer.inverseTransformKey(tkey);
@@ -521,7 +577,7 @@ final class TransformedCursor implements Cursor {
     private LockFailureException transformCurrent(LockFailureException e) throws IOException {
         mValue = NOT_LOADED;
         try {
-            mKey = mTransformer.transformKey(mSource.key(), NOT_LOADED);
+            mKey = mTransformer.transformKey(mSource);
         } catch (Throwable e2) {
             reset();
             throw e2;
@@ -546,27 +602,18 @@ final class TransformedCursor implements Cursor {
             return LockResult.UNOWNED;
         }
 
-        byte[] value = c.value();
+        byte[] tkey = mTransformer.transformKey(c);
+        mKey = tkey;
 
-        if (value == null) {
-            byte[] tkey = mTransformer.transformKey(key, null);
-            mKey = tkey;
+        if (c.value() == null) {
             mValue = null;
             if (tkey != null) {
                 // Retain the position and lock when value doesn't exist.
                 return result;
             }
         } else {
-            if (value == NOT_LOADED && mTransformer.requireValue()) {
-                // Disabling autoload mode makes little sense when using a value
-                // transformer, because the value must be loaded anyhow.
-                c.load();
-                value = c.value();
-            }
-            byte[] tkey = mTransformer.transformKey(key, value);
-            mKey = tkey;
             if (tkey != null) {
-                byte[] tvalue = mTransformer.transformValue(value, key, tkey);
+                byte[] tvalue = mTransformer.transformValue(c, tkey);
                 if (tvalue != null) {
                     mValue = tvalue;
                     return result;
@@ -588,29 +635,16 @@ final class TransformedCursor implements Cursor {
     /**
      * @param tkey mKey must have been set to this non-null key already
      */
-    private LockResult transformCurrent(LockResult result, final byte[] key, final byte[] tkey)
-        throws IOException
-    {
+    private LockResult transformCurrent(LockResult result, final byte[] tkey) throws IOException {
         final Cursor c = mSource;
-        final byte[] value = c.value();
 
-        if (value == null) {
+        if (c.value() == null) {
             // Retain the position and lock when value doesn't exist.
             mValue = null;
             return result;
         }
 
-        byte[] tvalue;
-
-        if (value != NOT_LOADED || !mTransformer.requireValue()) {
-            tvalue = mTransformer.transformValue(value, key, tkey);
-        } else {
-            // Disabling autoload mode makes little sense when using a value transformer,
-            // because the value must be loaded anyhow.
-            c.load();
-            tvalue = mTransformer.transformValue(c.value(), key, tkey);
-        }
-
+        byte[] tvalue = mTransformer.transformValue(c, tkey);
         mValue = tvalue;
 
         if (tvalue == null && result == LockResult.ACQUIRED) {

@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -49,11 +50,11 @@ final class _Lock {
     // Exclusive or upgradable locker.
     _LockOwner mOwner;
 
-    // _LockOwner instance if one shared locker, or else a hashtable for more.
-    // Field is re-used to indicate when an exclusive lock has ghosted an
-    // entry, which should be deleted when the transaction commits. A C-style
-    // union type would be handy. Object is a _Tree if entry is ghosted.
-    Object mSharedLockOwnersObj;
+    // _LockOwner instance if one shared locker, or else a hashtable for more. Field is re-used
+    // to indicate when an exclusive lock has ghosted an entry, which should be deleted when
+    // the transaction commits. A C-style union type would be handy. Object is a
+    // _CursorFrame.Ghost if entry is ghosted.
+    private Object mSharedLockOwnersObj;
 
     // Waiters for upgradable lock. Contains only regular waiters.
     LatchCondition mQueueU;
@@ -89,13 +90,16 @@ final class _Lock {
      * OWNED_UPGRADABLE, or OWNED_EXCLUSIVE
      * @throws IllegalStateException if too many shared locks
      */
-    LockResult tryLockShared(Latch latch, _LockOwner locker, long nanosTimeout) {
+    LockResult tryLockShared(Latch latch, _Locker locker, long nanosTimeout) {
         if (mOwner == locker) {
             return mLockCount == ~0 ? OWNED_EXCLUSIVE : OWNED_UPGRADABLE;
         }
 
         LatchCondition queueSX = mQueueSX;
         if (queueSX != null) {
+            if (mLockCount != 0 && isSharedLockOwner(locker)) {
+                return OWNED_SHARED;
+            }
             if (nanosTimeout == 0) {
                 locker.mWaitingFor = this;
                 return TIMED_OUT_LOCK;
@@ -120,8 +124,14 @@ final class _Lock {
             int w = queueSX.awaitShared(latch, nanosTimeout, nanosEnd);
             queueSX = mQueueSX;
 
+            if (queueSX == null) {
+                // Assume _LockManager was closed.
+                locker.mWaitingFor = null;
+                return INTERRUPTED;
+            }
+
             // After consuming one signal, next shared waiter must be signaled, and so on.
-            if (queueSX != null && !queueSX.signalNextShared()) {
+            if (!queueSX.signalNextShared()) {
                 // Indicate that last signal has been consumed, and also free memory.
                 mQueueSX = null;
             }
@@ -153,10 +163,6 @@ final class _Lock {
 
             if (nanosTimeout >= 0 && (nanosTimeout = nanosEnd - System.nanoTime()) <= 0) {
                 return TIMED_OUT_LOCK;
-            }
-
-            if (mQueueSX == null) {
-                mQueueSX = queueSX = new LatchCondition();
             }
         }
     }
@@ -215,7 +221,13 @@ final class _Lock {
             int w = queueU.await(latch, nanosTimeout, nanosEnd);
             queueU = mQueueU;
 
-            if (queueU != null && queueU.isEmpty()) {
+            if (queueU == null) {
+                // Assume _LockManager was closed.
+                locker.mWaitingFor = null;
+                return INTERRUPTED;
+            }
+
+            if (queueU.isEmpty()) {
                 // Indicate that last signal has been consumed, and also free memory.
                 mQueueU = null;
             }
@@ -268,10 +280,6 @@ final class _Lock {
             if (nanosTimeout >= 0 && (nanosTimeout = nanosEnd - System.nanoTime()) <= 0) {
                 return TIMED_OUT_LOCK;
             }
-
-            if (mQueueU == null) {
-                mQueueU = queueU = new LatchCondition();
-            }
         }
     }
 
@@ -321,7 +329,13 @@ final class _Lock {
             int w = queueSX.await(latch, nanosTimeout, nanosEnd);
             queueSX = mQueueSX;
 
-            if (queueSX != null && queueSX.isEmpty()) {
+            if (queueSX == null) {
+                // Assume _LockManager was closed.
+                locker.mWaitingFor = null;
+                return INTERRUPTED;
+            }
+
+            if (queueSX.isEmpty()) {
                 // Indicate that last signal has been consumed, and also free memory.
                 mQueueSX = null;
             }
@@ -357,10 +371,6 @@ final class _Lock {
             if (nanosTimeout >= 0 && (nanosTimeout = nanosEnd - System.nanoTime()) <= 0) {
                 return TIMED_OUT_LOCK;
             }
-
-            if (mQueueSX == null) {
-                mQueueSX = queueSX = new LatchCondition();
-            }
         }
     }
 
@@ -380,38 +390,55 @@ final class _Lock {
     }
 
     /**
-     * Called with exclusive latch held, which is retained.
+     * Called with exclusive latch held, which is released unless an exception is thrown.
      *
-     * @param latch briefly released and re-acquired for deleting a ghost
-     * @return true if lock is now completely unused
+     * @param ht briefly released and re-acquired for deleting a ghost
      * @throws IllegalStateException if lock not held
      */
-    boolean unlock(_LockOwner locker, Latch latch) {
+    void unlock(_LockOwner locker, _LockManager.LockHT ht) {
         if (mOwner == locker) {
-            deleteGhost(latch);
+            deleteGhost(ht);
+
             mOwner = null;
             LatchCondition queueU = mQueueU;
-            if (queueU != null) {
-                // Signal at most one upgradable lock waiter.
-                queueU.signal();
-            }
             int count = mLockCount;
+
             if (count != ~0) {
-                // Unlocking upgradable lock.
-                return (mLockCount = count & 0x7fffffff) == 0
-                    && queueU == null && mQueueSX == null;
+                // Unlocking an upgradable lock.
+                if ((mLockCount = count & 0x7fffffff) == 0 && queueU == null && mQueueSX == null) {
+                    // _Lock is now completely unused.
+                    ht.remove(this);
+                } else if (queueU != null) {
+                    // Signal at most one upgradable lock waiter.
+                    if (queueU.signalRelease(ht)) {
+                        return;
+                    }
+                }
             } else {
-                // Unlocking exclusive lock.
+                // Unlocking an exclusive lock.
                 mLockCount = 0;
                 LatchCondition queueSX = mQueueSX;
                 if (queueSX == null) {
-                    return queueU == null;
+                    if (queueU == null) {
+                        // _Lock is now completely unused.
+                        ht.remove(this);
+                    } else {
+                        // Signal at most one upgradable lock waiter.
+                        if (queueU.signalRelease(ht)) {
+                            return;
+                        }
+                    }
                 } else {
-                    // Signal first shared lock waiter. Queue doesn't contain
-                    // any exclusive lock waiters, because they would need to
-                    // acquire upgradable lock first, which was held.
-                    queueSX.signal();
-                    return false;
+                    if (queueU != null) {
+                        // Signal at most one upgradable lock waiter, and keep the latch.
+                        queueU.signal();
+                    }
+                    // Signal first shared lock waiter. Queue doesn't contain any exclusive
+                    // lock waiters, because they would need to acquire upgradable lock first,
+                    // which was held.
+                    if (queueSX.signalRelease(ht)) {
+                        return;
+                    }
                 }
             }
         } else {
@@ -434,7 +461,12 @@ final class _Lock {
                     }
                 }
 
-                throw new IllegalStateException("_Lock not held");
+                if (isClosed(locker)) {
+                    ht.releaseExclusive();
+                    return;
+                }
+
+                throw new IllegalStateException("Lock not held");
             }
 
             mLockCount = --count;
@@ -442,20 +474,24 @@ final class _Lock {
             LatchCondition queueSX = mQueueSX;
             if (count == 0x80000000) {
                 if (queueSX != null) {
-                    // Signal any exclusive lock waiter. Queue shouldn't contain
-                    // any shared lock waiters, because no exclusive lock is
-                    // held. In case there are any, signal them instead.
-                    queueSX.signal();
+                    // Signal any exclusive lock waiter. Queue shouldn't contain any shared
+                    // lock waiters, because no exclusive lock is held. In case there are any,
+                    // signal them instead.
+                    if (queueSX.signalRelease(ht)) {
+                        return;
+                    }
                 }
-                return false;
-            } else {
-                return count == 0 && queueSX == null && mQueueU == null;
+            } else if (count == 0 && queueSX == null && mQueueU == null) {
+                // _Lock is now completely unused.
+                ht.remove(this);
             }
         }
+
+        ht.releaseExclusive();
     }
 
     /**
-     * Called with exclusive latch held, which is retained.
+     * Called with exclusive latch held, which is released unless an exception is thrown.
      *
      * @param latch briefly released and re-acquired for deleting a ghost
      * @throws IllegalStateException if lock not held or too many shared locks
@@ -463,13 +499,11 @@ final class _Lock {
     void unlockToShared(_LockOwner locker, Latch latch) {
         if (mOwner == locker) {
             deleteGhost(latch);
+
             mOwner = null;
             LatchCondition queueU = mQueueU;
-            if (queueU != null) {
-                // Signal at most one upgradable lock waiter.
-                queueU.signal();
-            }
             int count = mLockCount;
+
             if (count != ~0) {
                 // Unlocking upgradable lock into shared.
                 if ((count &= 0x7fffffff) >= 0x7ffffffe) {
@@ -483,104 +517,248 @@ final class _Lock {
                 addSharedLockOwner(0, locker);
                 LatchCondition queueSX = mQueueSX;
                 if (queueSX != null) {
-                    // Signal first shared lock waiter. Queue doesn't contain
-                    // any exclusive lock waiters, because they would need to
-                    // acquire upgradable lock first, which was held.
-                    queueSX.signal();
+                    if (queueU != null) {
+                        // Signal at most one upgradable lock waiter, and keep the latch.
+                        queueU.signal();
+                    }
+                    // Signal the first shared lock waiter. Queue doesn't contain any exclusive
+                    // lock waiters, because they would need to acquire upgradable lock first,
+                    // which was held.
+                    if (!queueSX.signalRelease(latch)) {
+                        latch.releaseExclusive();
+                    }
+                    return;
                 }
             }
-        } else if (mLockCount == 0 || !isSharedLockOwner(locker)) {
-            throw new IllegalStateException("_Lock not held");
+
+            // Signal at most one upgradable lock waiter.
+            if (queueU != null && queueU.signalRelease(latch)) {
+                return;
+            }
+        } else if ((mLockCount == 0 || !isSharedLockOwner(locker)) && !isClosed(locker)) {
+            throw new IllegalStateException("Lock not held");
         }
+
+        latch.releaseExclusive();
     }
 
     /**
-     * Called with exclusive latch held, which is retained.
+     * Called with exclusive latch held, which is released unless an exception is thrown.
      *
      * @param latch briefly released and re-acquired for deleting a ghost
      * @throws IllegalStateException if lock not held
      */
     void unlockToUpgradable(_LockOwner locker, Latch latch) {
         if (mOwner != locker) {
+            if (isClosed(locker)) {
+                latch.releaseExclusive();
+                return;
+            }
             String message = "Exclusive or upgradable lock not held";
             if (mLockCount == 0 || !isSharedLockOwner(locker)) {
-                message = "_Lock not held";
+                message = "Lock not held";
             }
             throw new IllegalStateException(message);
         }
         if (mLockCount != ~0) {
             // Already upgradable.
+            latch.releaseExclusive();
             return;
         }
         deleteGhost(latch);
         mLockCount = 0x80000000;
         LatchCondition queueSX = mQueueSX;
-        if (queueSX != null) {
-            queueSX.signalShared();
+        if (queueSX == null || !queueSX.signalSharedRelease(latch)) {
+            latch.releaseExclusive();
         }
+    }
+
+    private static boolean isClosed(_LockOwner locker) {
+        _LocalDatabase db = locker.getDatabase();
+        return db != null && db.isClosed();
     }
 
     /**
      * @param latch might be briefly released and re-acquired
      */
     void deleteGhost(Latch latch) {
-        // TODO: Unlock due to rollback can be optimized. It never needs to
-        // actually delete ghosts, because the undo actions replaced
-        // them. Calling _TreeCursor.deleteGhost performs a pointless search.
+        // TODO: Unlock due to rollback can be optimized. It never needs to actually delete
+        // ghosts, because the undo actions replaced them.
 
         Object obj = mSharedLockOwnersObj;
-        if (!(obj instanceof _Tree)) {
+        if (!(obj instanceof _CursorFrame.Ghost)) {
             return;
         }
 
-        _Tree tree = (_Tree) obj;
+        final _CursorFrame.Ghost frame = (_CursorFrame.Ghost) obj;
+        mSharedLockOwnersObj = null;
 
-        try {
-            while (true) {
-                _TreeCursor c = new _TreeCursor(tree, null);
-                c.autoload(false);
-                byte[] key = mKey;
-                mSharedLockOwnersObj = null;
+        final _LocalDatabase db = mOwner.getDatabase();
+        if (db == null) {
+            // Database was closed.
+            return;
+        }
 
-                // Release to prevent deadlock, since additional latches are
-                // required for delete.
-                latch.releaseExclusive();
-                try {
-                    if (c.deleteGhost(key)) {
-                        break;
+        byte[] key = mKey;
+        boolean unlatched = false;
+
+        CommitLock.Shared shared = db.commitLock().tryAcquireShared();
+        if (shared == null) {
+            // Release lock management latch to prevent deadlock.
+            latch.releaseExclusive();
+            unlatched = true;
+            shared = db.commitLock().acquireShared();
+        }
+
+        // Note: Unlike regular frames, ghost frames cannot be unbound (popAll)
+        // from the node after the node latch is released. If the node latch is
+        // released before the frame is unbound, another thread can then evict
+        // the node and unbind the ghost frame instances concurrently, which
+        // isn't thread-safe and can corrupt the cursor frame list.
+
+        doDelete: try {
+            _Node node = frame.mNode;
+            if (node != null) latchNode: {
+                if (!unlatched) {
+                    while (node.tryAcquireExclusive()) {
+                        _Node actualNode = frame.mNode;
+                        if (actualNode == node) {
+                            break latchNode;
+                        }
+                        node.releaseExclusive();
+                        node = actualNode;
+                        if (node == null) {
+                            break latchNode;
+                        }
                     }
-                    // Reopen closed index.
-                    tree = (_Tree) tree.mDatabase.indexById(tree.mId);
-                    if (tree == null) {
-                        // Assume index was deleted.
-                        break;
-                    }
-                } finally {
-                    latch.acquireExclusive();
+
+                    // Release lock management latch to prevent deadlock.
+                    latch.releaseExclusive();
+                    unlatched = true;
                 }
+
+                node = frame.acquireExclusiveIfBound();
+            }
+
+            if (node == null) {
+                // Will need to delete the slow way.
+            } else if (!db.isMutable(node)) {
+                // _Node cannot be dirtied without a full cursor, so delete the slow way.
+                _CursorFrame.popAll(frame);
+                node.releaseExclusive();
+            } else {
+                // Frame is still valid and node is mutable, so perform a quick delete.
+
+                int pos = frame.mNodePos;
+                if (pos < 0) {
+                    // Already deleted.
+                    _CursorFrame.popAll(frame);
+                    node.releaseExclusive();
+                    break doDelete;
+                }
+
+                _Split split = node.mSplit;
+                if (split == null) {
+                    try {
+                        if (node.hasLeafValue(pos) == null) {
+                            // Ghost still exists, so delete it.
+                            node.deleteLeafEntry(pos);
+                            node.postDelete(pos, key);
+                        }
+                    } finally {
+                        _CursorFrame.popAll(frame);
+                        node.releaseExclusive();
+                    }
+                } else {
+                    _Node sibling;
+                    try {
+                        sibling = split.latchSiblingEx();
+                    } catch (Throwable e) {
+                        _CursorFrame.popAll(frame);
+                        node.releaseExclusive();
+                        throw e;
+                    }
+
+                    try {
+                        split.rebindFrame(frame, sibling);
+
+                        _Node actualNode = frame.mNode;
+                        int actualPos = frame.mNodePos;
+
+                        if (actualNode.hasLeafValue(actualPos) == null) {
+                            // Ghost still exists, so delete it.
+                            actualNode.deleteLeafEntry(actualPos);
+                            // Fix existing frames on original node. Other than potentially the
+                            // ghost frame, no frames exist on the sibling.
+                            node.postDelete(pos, key);
+                        }
+                    } finally {
+                        // Pop the frames before releasing the latches, preventing other
+                        // threads from observing a frame bound to the sibling too soon.
+                        _CursorFrame.popAll(frame);
+                        sibling.releaseExclusive();
+                        node.releaseExclusive();
+                    }
+                }
+
+                break doDelete;
+            }
+
+            // Delete the ghost the slow way. Open the index, and then search for the ghost.
+
+            if (!unlatched) {
+                // Release lock management latch to prevent deadlock.
+                latch.releaseExclusive();
+                unlatched = true;
+            }
+
+            while (true) {
+                Index ix = db.anyIndexById(mIndexId);
+                if (!(ix instanceof _Tree)) {
+                    // Assume index was deleted.
+                    break;
+                }
+                _TreeCursor c = new _TreeCursor((_Tree) ix);
+                if (c.deleteGhost(key)) {
+                    break;
+                }
+                // Reopen a closed index.
             }
         } catch (Throwable e) {
-            // Exception indicates that database is borked. Ghost will get
-            // cleaned up when database is re-opened.
-            latch.releaseExclusive();
+            // Exception indicates that database is borked. Ghost will get cleaned up when
+            // database is re-opened.
+            shared.release();
+            if (!unlatched) {
+                // Release lock management latch to prevent deadlock.
+                latch.releaseExclusive();
+            }
             try {
-                Utils.closeQuietly(null, ((_Tree) obj).mDatabase, e);
+                Utils.closeQuietly(mOwner.getDatabase(), e);
             } finally {
                 latch.acquireExclusive();
             }
+            return;
+        }
+
+        shared.release();
+        if (unlatched) {
+            latch.acquireExclusive();
         }
     }
 
     /**
      * _Lock must be held by given locker, which is either released or transferred into a lock
      * set. Exclusive locks are transferred, and any other type is released. Method must be
-     * called by _LockManager with appropriate latch held.
+     * called by _LockManager with exclusive latch held, which is released unless an exception
+     * is thrown.
      *
+     * @param ht used to remove this lock if not exclusively held and is no longer used; must
+     * be exclusively held
      * @param pending lock set to add into; can be null initially
      * @return new or original lock set
      * @throws IllegalStateException if lock not held
      */
-    _PendingTxn transferExclusive(_LockOwner locker, _PendingTxn pending) {
+    _PendingTxn transferExclusive(_LockOwner locker, _LockManager.LockHT ht, _PendingTxn pending) {
         if (mLockCount == ~0) {
             // Held exclusively. Must double check expected owner because _Locker tracks _Lock
             // instance multiple times for handling upgrades. Without this check, _Lock can be
@@ -593,9 +771,12 @@ final class _Lock {
                 }
                 mOwner = pending;
             }
+            ht.releaseExclusive();
         } else {
-            // Unlock upgradable or shared lock.
-            unlock(locker, null);
+            // Unlock upgradable or shared lock. Note that ht is passed along, to allow the
+            // latch to be released. This also permits it to delete a ghost, but this shouldn't
+            // be possible. An exclusive lock would have been held and detected above.
+            unlock(locker, ht);
         }
         return pending;
     }
@@ -605,13 +786,46 @@ final class _Lock {
     }
 
     /**
+     * Must hold exclusive lock to be valid.
+     */
+    void setGhostFrame(_CursorFrame.Ghost frame) {
+        mSharedLockOwnersObj = frame;
+    }
+
+    void setSharedLockOwner(_LockOwner owner) {
+        mSharedLockOwnersObj = owner;
+    }
+
+    /**
+     * Is null, a _LockOwner, a LockOwnerHTEntry[], or a _CursorFrame.Ghost.
+     */
+    Object getSharedLockOwner() {
+        return mSharedLockOwnersObj;
+    }
+
+    /**
+     * @param lockType TYPE_SHARED, TYPE_UPGRADABLE, or TYPE_EXCLUSIVE
+     */
+    void detectDeadlock(_Locker locker, int lockType, long nanosTimeout)
+        throws DeadlockException
+    {
+        _DeadlockDetector detector = new _DeadlockDetector(locker);
+        if (detector.scan()) {
+            Object att = findOwnerAttachment(locker, lockType);
+            throw new DeadlockException(nanosTimeout, att,
+                                        detector.mGuilty,
+                                        detector.newDeadlockSet(lockType));
+        }
+    }
+
+    /**
      * Find an exclusive owner attachment, or the first found shared owner attachment. Might
      * acquire and release a shared latch to access the shared owner attachment.
      *
      * @param locker pass null if already latched
      * @param lockType TYPE_SHARED, TYPE_UPGRADABLE, or TYPE_EXCLUSIVE
      */
-    Object findOwnerAttachment(_Locker locker, int lockType, int hash) {
+    Object findOwnerAttachment(_Locker locker, int lockType) {
         // See note in _DeadlockDetector regarding unlatched access to this _Lock.
 
         _LockOwner owner = mOwner;
@@ -641,10 +855,10 @@ final class _Lock {
                 // Need a latch to safely check the shared lock owner hashtable.
                 _LockManager manager = locker.mManager;
                 if (manager != null) {
-                    _LockManager.LockHT ht = manager.getLockHT(hash);
+                    _LockManager.LockHT ht = manager.getLockHT(mHashCode);
                     ht.acquireShared();
                     try {
-                        return findOwnerAttachment(null, lockType, hash);
+                        return findOwnerAttachment(null, lockType);
                     } finally {
                         ht.releaseShared();
                     }

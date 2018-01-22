@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -20,6 +21,12 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.InterruptedIOException;
 import java.io.IOException;
+
+import java.util.Comparator;
+
+import java.nio.charset.StandardCharsets;
+
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.cojen.tupl.PageOps.*;
 import static org.cojen.tupl.Utils.*;
@@ -88,6 +95,11 @@ class Tree implements View, Index {
     }
 
     @Override
+    public Comparator<byte[]> getComparator() {
+        return KeyComparator.THE;
+    }
+
+    @Override
     public final long getId() {
         return mId;
     }
@@ -103,11 +115,7 @@ class Tree implements View, Index {
         if (name == null) {
             return null;
         }
-        try {
-            return new String(name, "UTF-8");
-        } catch (IOException e) {
-            return new String(name);
-        }
+        return new String(name, StandardCharsets.UTF_8);
     }
 
     @Override
@@ -116,13 +124,18 @@ class Tree implements View, Index {
     }
 
     @Override
+    public Transaction newTransaction(DurabilityMode durabilityMode) {
+        return mDatabase.newTransaction(durabilityMode);
+    }
+
+    @Override
     public long count(byte[] lowKey, byte[] highKey) throws IOException {
-        TreeCursor cursor = new TreeCursor(this, Transaction.BOGUS);
+        TreeCursor cursor = newCursor(Transaction.BOGUS);
         TreeCursor high = null;
         try {
             if (highKey != null) {
-                high = new TreeCursor(this, Transaction.BOGUS);
-                high.autoload(false);
+                high = newCursor(Transaction.BOGUS);
+                high.mKeyOnly = true;
                 high.find(highKey);
                 if (high.mKey == null) {
                     // Found nothing.
@@ -158,6 +171,8 @@ class Tree implements View, Index {
         // before releasing the root latch. Also, Node.used is not invoked for the root node,
         // because it cannot be evicted.
 
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
         while (!node.isLeaf()) {
             int childPos;
             try {
@@ -168,26 +183,15 @@ class Tree implements View, Index {
             }
 
             long childId = node.retrieveChildRefId(childPos);
-            Node childNode = mDatabase.nodeMapGet(childId);
+            Node childNode = mDatabase.nodeMapGetShared(childId);
 
             if (childNode != null) {
-                childNode.acquireShared();
-
-                // Need to check again in case evict snuck in.
-                if (childId == childNode.mId) {
-                    node.releaseShared();
-                    node = childNode;
-                    if (node.mSplit != null) {
-                        node = node.mSplit.selectNode(node, key);
-                    }
-                    node.used();
-                    continue;
-                }
-
-                childNode.releaseShared();
+                node.releaseShared();
+                node = childNode;
+                node.used(rnd);
+            } else {
+                node = node.loadChild(mDatabase, childId, Node.OPTION_PARENT_RELEASE_SHARED);
             }
-
-            node = node.loadChild(mDatabase, childId, Node.OPTION_PARENT_RELEASE_SHARED);
 
             if (node.mSplit != null) {
                 node = node.mSplit.selectNode(node, key);
@@ -356,41 +360,209 @@ class Tree implements View, Index {
     }
 
     @Override
-    public void store(Transaction txn, byte[] key, byte[] value) throws IOException {
-        keyCheck(key);
-        TreeCursor cursor = new TreeCursor(this, txn);
-        cursor.autoload(false);
-        cursor.findAndStore(key, value);
+    public final boolean exists(Transaction txn, byte[] key) throws IOException {
+        LocalTransaction local = check(txn);
+
+        // If lock must be acquired and retained, acquire now and skip the quick check later.
+        if (local != null) {
+            int lockType = local.lockMode().repeatable;
+            if (lockType != 0) {
+                int hash = LockManager.hash(mId, key);
+                local.lock(lockType, mId, key, hash, local.mLockTimeoutNanos);
+            }
+        }
+
+        Node node = mRoot;
+        node.acquireShared();
+
+        // Note: No need to check if root has split, since root splits are always completed
+        // before releasing the root latch. Also, Node.used is not invoked for the root node,
+        // because it cannot be evicted.
+
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+        while (!node.isLeaf()) {
+            int childPos;
+            try {
+                childPos = Node.internalPos(node.binarySearch(key));
+            } catch (Throwable e) {
+                node.releaseShared();
+                throw e;
+            }
+
+            long childId = node.retrieveChildRefId(childPos);
+            Node childNode = mDatabase.nodeMapGetShared(childId);
+
+            if (childNode != null) {
+                node.releaseShared();
+                node = childNode;
+                node.used(rnd);
+            } else {
+                node = node.loadChild(mDatabase, childId, Node.OPTION_PARENT_RELEASE_SHARED);
+            }
+
+            if (node.mSplit != null) {
+                node = node.mSplit.selectNode(node, key);
+            }
+        }
+
+        // Sub search into leaf with shared latch held.
+
+        CursorFrame frame;
+        int keyHash;
+
+        try {
+            int pos = node.binarySearch(key);
+
+            if ((local != null && local.lockMode() != LockMode.READ_COMMITTED) ||
+                mLockManager.isAvailable(local, mId, key, keyHash = LockManager.hash(mId, key)))
+            {
+                return pos >= 0 && node.hasLeafValue(pos) != null;
+            }
+
+            // Need to acquire the lock before loading. To prevent deadlock, a cursor
+            // frame must be bound and then the node latch can be released.
+            frame = new CursorFrame();
+
+            if (pos >= 0) {
+                if (node.mSplit != null) {
+                    pos = node.mSplit.adjustBindPosition(pos);
+                }
+            } else {
+                frame.mNotFoundKey = key;
+                if (node.mSplit != null) {
+                    pos = ~node.mSplit.adjustBindPosition(~pos);
+                }
+            }
+
+            frame.bind(node, pos);
+        } finally {
+            node.releaseShared();
+        }
+
+        try {
+            Locker locker;
+            if (local == null) {
+                locker = lockSharedLocal(key, keyHash);
+            } else if (local.lockShared(mId, key, keyHash) == LockResult.ACQUIRED) {
+                locker = local;
+            } else {
+                // Transaction already had the lock for some reason, so don't release it.
+                locker = null;
+            }
+
+            try {
+                node = frame.acquireShared();
+                int pos = frame.mNodePos;
+                boolean result = pos >= 0 && node.hasLeafValue(pos) != null;
+                node.releaseShared();
+                return result;
+            } finally {
+                if (locker != null) {
+                    locker.unlock();
+                }
+            }
+        } finally {
+            CursorFrame.popAll(frame);
+        }
     }
 
     @Override
-    public byte[] exchange(Transaction txn, byte[] key, byte[] value) throws IOException {
+    public final void store(Transaction txn, byte[] key, byte[] value) throws IOException {
         keyCheck(key);
-        return new TreeCursor(this, txn).findAndStore(key, value);
+        TreeCursor cursor = newCursor(txn);
+        try {
+            cursor.mKeyOnly = true;
+            cursor.findAndStore(key, value);
+        } finally {
+            cursor.reset();
+        }
     }
 
     @Override
-    public boolean insert(Transaction txn, byte[] key, byte[] value) throws IOException {
+    public final byte[] exchange(Transaction txn, byte[] key, byte[] value) throws IOException {
         keyCheck(key);
-        TreeCursor cursor = new TreeCursor(this, txn);
-        cursor.autoload(false);
-        return cursor.findAndModify(key, TreeCursor.MODIFY_INSERT, value);
+        TreeCursor cursor = newCursor(txn);
+        try {
+            return cursor.findAndStore(key, value);
+        } finally {
+            cursor.reset();
+        }
     }
 
     @Override
-    public boolean replace(Transaction txn, byte[] key, byte[] value) throws IOException {
+    public final boolean insert(Transaction txn, byte[] key, byte[] value) throws IOException {
         keyCheck(key);
-        TreeCursor cursor = new TreeCursor(this, txn);
-        cursor.autoload(false);
-        return cursor.findAndModify(key, TreeCursor.MODIFY_REPLACE, value);
+        TreeCursor cursor = newCursor(txn);
+        try {
+            cursor.mKeyOnly = true;
+            return cursor.findAndModify(key, TreeCursor.MODIFY_INSERT, value);
+        } finally {
+            cursor.reset();
+        }
     }
 
     @Override
-    public boolean update(Transaction txn, byte[] key, byte[] oldValue, byte[] newValue)
+    public final boolean replace(Transaction txn, byte[] key, byte[] value) throws IOException {
+        keyCheck(key);
+        TreeCursor cursor = newCursor(txn);
+        try {
+            cursor.mKeyOnly = true;
+            return cursor.findAndModify(key, TreeCursor.MODIFY_REPLACE, value);
+        } finally {
+            cursor.reset();
+        }
+    }
+
+    @Override
+    public final boolean update(Transaction txn, byte[] key, byte[] value) throws IOException {
+        keyCheck(key);
+        TreeCursor cursor = newCursor(txn);
+        try {
+            // TODO: Optimize by disabling autoload and do an in-place comparison.
+            return cursor.findAndModify(key, TreeCursor.MODIFY_UPDATE, value);
+        } finally {
+            cursor.reset();
+        }
+    }
+
+    @Override
+    public final boolean update(Transaction txn, byte[] key, byte[] oldValue, byte[] newValue)
         throws IOException
     {
         keyCheck(key);
-        return new TreeCursor(this, txn).findAndModify(key, oldValue, newValue);
+        TreeCursor cursor = newCursor(txn);
+        try {
+            return cursor.findAndModify(key, oldValue, newValue);
+        } finally {
+            cursor.reset();
+        }
+    }
+
+    @Override
+    public LockResult touch(Transaction txn, byte[] key) throws LockFailureException {
+        LocalTransaction local = check(txn);
+
+        LockMode mode;
+        if (local == null || (mode = local.lockMode()) == LockMode.READ_COMMITTED) {
+            int hash = LockManager.hash(mId, key);
+            if (!isLockAvailable(local, key, hash)) {
+                // Acquire and release.
+                if (local == null) {
+                    lockSharedLocal(key, hash).unlock();
+                } else {
+                    LockResult result = local.lock(0, mId, key, hash, local.mLockTimeoutNanos);
+                    if (result == LockResult.ACQUIRED) {
+                        local.unlock();
+                    }
+                }
+            }
+        } else if (!mode.noReadLock) {
+            int hash = LockManager.hash(mId, key);
+            return local.lock(mode.repeatable, mId, key, hash, local.mLockTimeoutNanos);
+        }
+
+        return LockResult.UNOWNED;
     }
 
     @Override
@@ -438,15 +610,6 @@ class Tree implements View, Index {
         return check(txn).lockCheck(mId, key);
     }
 
-    /*
-    @Override
-    public Stream newStream() {
-        TreeCursor cursor = new TreeCursor(this);
-        cursor.autoload(false);
-        return new TreeValueStream(cursor);
-    }
-    */
-
     @Override
     public View viewGe(byte[] key) {
         return BoundedView.viewGe(this, key);
@@ -477,6 +640,11 @@ class Tree implements View, Index {
         return isClosed();
     }
 
+    @Override
+    public final boolean isModifyAtomic() {
+        return true;
+    }
+
     /**
      * Current approach for evicting data is as follows:
      * - Search for a random Node, steered towards un-cached nodes. 
@@ -504,7 +672,7 @@ class Tree implements View, Index {
         throws IOException
     {
         long length = 0;
-        TreeCursor cursor = new TreeCursor(this, txn);
+        TreeCursor cursor = newCursor(txn);
         cursor.autoload(autoload);
 
         try {
@@ -558,9 +726,9 @@ class Tree implements View, Index {
 
     @Override
     public Stats analyze(byte[] lowKey, byte[] highKey) throws IOException {
-        TreeCursor cursor = new TreeCursor(this, Transaction.BOGUS);
+        TreeCursor cursor = newCursor(Transaction.BOGUS);
         try {
-            cursor.autoload(false);
+            cursor.mKeyOnly = true;
             cursor.random(lowKey, highKey);
             return cursor.key() == null ? new Stats(0, 0, 0, 0, 0) : cursor.analyze();
         } catch (Throwable e) {
@@ -593,9 +761,9 @@ class Tree implements View, Index {
             return false;
         }
 
-        TreeCursor cursor = new TreeCursor(this, Transaction.BOGUS);
+        TreeCursor cursor = newCursor(Transaction.BOGUS);
         try {
-            cursor.autoload(false);
+            cursor.mKeyOnly = true;
 
             // Find the first node instead of calling first() to ensure that cursor is
             // positioned. Otherwise, empty trees would be skipped even when the root node
@@ -639,9 +807,9 @@ class Tree implements View, Index {
      * @return false if should stop
      */
     final boolean verifyTree(Index view, VerificationObserver observer) throws IOException {
-        TreeCursor cursor = new TreeCursor(this, Transaction.BOGUS);
+        TreeCursor cursor = newCursor(Transaction.BOGUS);
         try {
-            cursor.autoload(false);
+            cursor.mKeyOnly = true;
             cursor.first(); // must start with loaded key
             int height = cursor.height();
             if (!observer.indexBegin(view, height)) {
@@ -662,7 +830,7 @@ class Tree implements View, Index {
 
     @Override
     public final void close() throws IOException {
-        close(false, false);
+        close(false, false, false);
     }
 
     /**
@@ -670,6 +838,23 @@ class Tree implements View, Index {
      * @return root node if forDelete; null if already closed
      */
     final Node close(boolean forDelete, final boolean rootLatched) throws IOException {
+        return close(forDelete, rootLatched, false);
+    }
+
+    /**
+     * Close any kind of index, even an internal one.
+     */
+    final void forceClose() throws IOException {
+        close(false, false, true);
+    }
+
+    /**
+     * @param rootLatched true if root node is already latched by the current thread
+     * @return root node if forDelete; null if already closed
+     */
+    private Node close(boolean forDelete, final boolean rootLatched, boolean force)
+        throws IOException
+    {
         Node root = mRoot;
 
         if (!rootLatched) {
@@ -682,7 +867,7 @@ class Tree implements View, Index {
                 return null;
             }
 
-            if (isInternal(mId)) {
+            if (!force && isInternal(mId)) {
                 throw new IllegalStateException("Cannot close an internal index");
             }
 
@@ -764,29 +949,44 @@ class Tree implements View, Index {
      * @return delete task
      */
     final Runnable drop(boolean mustBeEmpty) throws IOException {
-        Node root = mRoot;
-        root.acquireExclusive();
+        // Acquire early to avoid deadlock when moving tree to trash.
+        CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
+
+        Node root;
         try {
-            if (root.mPage == p_closedTreePage()) {
-                throw new ClosedIndexException();
+            root = mRoot;
+            root.acquireExclusive();
+        } catch (Throwable e) {
+            shared.release();
+            throw e;
+        }
+
+        try {
+            try {
+                if (root.mPage == p_closedTreePage()) {
+                    throw new ClosedIndexException();
+                }
+
+                if (mustBeEmpty && (!root.isLeaf() || root.hasKeys())) {
+                    // Note that this check also covers the transactional case, because deletes
+                    // store ghosts. The message could be more accurate, but it would require
+                    // scanning the whole index looking for ghosts. Using LockMode.UNSAFE
+                    // deletes it's possible to subvert the transactional case, allowing the
+                    // drop to proceed. The rollback logic in UndoLog accounts for this,
+                    // ignoring undo operations for missing indexes. Preventing the drop in
+                    // this case isn't worth the trouble, because UNSAFE is what it is.
+                    throw new IllegalStateException("Cannot drop a non-empty index");
+                }
+
+                if (isInternal(mId)) {
+                    throw new IllegalStateException("Cannot close an internal index");
+                }
+            } catch (Throwable e) {
+                shared.release();
+                throw e;
             }
 
-            if (mustBeEmpty && (!root.isLeaf() || root.hasKeys())) {
-                // Note that this check also covers the transactional case, because deletes
-                // store ghosts. The message could be more accurate, but it would require
-                // scanning the whole index looking for ghosts. Using LockMode.UNSAFE deletes
-                // it's possible to subvert the transactional case, allowing the drop to
-                // proceed. The rollback logic in UndoLog accounts for this, ignoring undo
-                // operations for missing indexes. Preventing the drop in this case isn't worth
-                // the trouble, because UNSAFE is what it is.
-                throw new IllegalStateException("Cannot drop a non-empty index");
-            }
-
-            if (isInternal(mId)) {
-                throw new IllegalStateException("Cannot close an internal index");
-            }
-
-            return mDatabase.deleteTree(this);
+            return mDatabase.deleteTree(this, shared);
         } finally {
             root.releaseExclusive();
         }
@@ -795,9 +995,229 @@ class Tree implements View, Index {
     /**
      * Non-transactionally deletes all entries in the tree. No other cursors or threads can be
      * active in the tree. The root node is prepared for deletion as a side effect.
+     *
+     * @return false if stopped because database is closed
      */
-    final void deleteAll() throws IOException {
-        new TreeCursor(this, Transaction.BOGUS).deleteAll();
+    final boolean deleteAll() throws IOException {
+        return newCursor(Transaction.BOGUS).deleteAll();
+    }
+
+    /**
+     * Graft two non-empty temporary trees together into a single surviving tree, which is
+     * returned. All keys of this tree must be less than all keys of the other tree, which
+     * isn't verified or concurrently enforced. No cursors or threads can be active in either
+     * tree when grafting them together.
+     *
+     * <p>The victim tree is deleted, although the Tree object isn't completely invalidated.
+     * Just discard it and don't close it.
+     */
+    static Tree graftTempTree(Tree lowTree, Tree highTree) throws IOException {
+        // Note: Supporting non-temporary trees would require special redo and replication
+        // code. Also, all active cursors must be reset and the root latch would need to be
+        // held the whole time.
+
+        TreeCursor lowCursor, highCursor;
+
+        lowCursor = lowTree.newCursor(Transaction.BOGUS);
+        try {
+            lowCursor.mKeyOnly = true;
+            lowCursor.last();
+
+            highCursor = highTree.newCursor(Transaction.BOGUS);
+            try {
+                highCursor.mKeyOnly = true;
+                highCursor.first();
+
+                CommitLock.Shared shared = lowTree.mDatabase.commitLock().acquireShared();
+                try {
+                    return doGraftTempTree(lowTree, highTree, lowCursor, highCursor);
+                } finally {
+                    shared.release();
+                }
+            } finally {
+                highCursor.reset();
+            }
+        } finally {
+            lowCursor.reset();
+        }
+    }
+
+    private static Tree doGraftTempTree(Tree lowTree, Tree highTree,
+                                        TreeCursor lowCursor, TreeCursor highCursor)
+        throws IOException
+    {
+
+        // Dirty the edge nodes and find the mid key.
+
+        byte[] midKey;
+        CursorFrame lowFrame, highFrame;
+        {
+            lowFrame = lowCursor.leafExclusive();
+            Node lowNode = lowCursor.notSplitDirty(lowFrame);
+            try {
+                highFrame = highCursor.leafExclusive();
+                Node highNode = highCursor.notSplitDirty(highFrame);
+                try {
+                    midKey = lowNode.midKey(lowNode.highestLeafPos(), highNode, 0);
+                } finally {
+                    highNode.releaseExclusive();
+                }
+            } finally {
+                lowNode.releaseExclusive();
+            }
+        }
+
+        // Find the level to perform the graft, which is at the victim root node.
+
+        Tree survivor, victim;
+        CursorFrame survivorFrame;
+        Node victimNode;
+
+        while (true) {
+            CursorFrame lowParent = lowFrame.mParentFrame;
+            CursorFrame highParent = highFrame.mParentFrame;
+
+            if (highParent == null) {
+                survivor = lowTree;
+                survivorFrame = lowFrame;
+                victim = highTree;
+                victimNode = highFrame.acquireExclusive();
+                break;
+            } else if (lowParent == null) {
+                survivor = highTree;
+                survivorFrame = highFrame;
+                victim = lowTree;
+                victimNode = lowFrame.acquireExclusive();
+                break;
+            }
+
+            lowFrame = lowParent;
+            highFrame = highParent;
+        }
+
+        Node survivorNode;
+        try {
+            Split split = new Split(lowTree == survivor, victimNode);
+            split.setKey(survivor, midKey);
+            survivorNode = survivorFrame.acquireExclusive();
+            survivorNode.mSplit = split;
+        } finally {
+            victimNode.releaseExclusive();
+        }
+
+        try {
+            // Clear the extremity bits, before any exception from finishSplit.
+            clearExtremityBits(lowCursor.mLeaf, survivorFrame, ~Node.HIGH_EXTREMITY);
+            clearExtremityBits(highCursor.mLeaf, survivorFrame, ~Node.LOW_EXTREMITY);
+
+            survivor.finishSplit(survivorFrame, survivorNode).releaseExclusive();
+        } catch (Throwable e) {
+            survivorNode.cleanupFragments(e, survivorNode.mSplit.fragmentedKey());
+            throw e;
+        }
+
+        victim.mDatabase.removeGraftedTempTree(victim);
+
+        Node rootNode = survivor.mRoot;
+        rootNode.acquireExclusive();
+
+        if (rootNode.numKeys() == 1 && rootNode.isInternal()) {
+            // Try to remove a level, which was likely created by the split.
+
+            LocalDatabase db = survivor.mDatabase;
+            Node leftNode = db.latchChildRetainParentEx(rootNode, 0, true);
+            Node rightNode;
+            try {
+                rightNode = db.latchChildRetainParentEx(rootNode, 2, true);
+            } catch (Throwable e) {
+                leftNode.releaseExclusive();
+                throw e;
+            }
+
+            tryMerge: {
+                if (leftNode.isLeaf()) {
+                    // See TreeCursor.mergeLeaf method.
+
+                    int leftAvail = leftNode.availableLeafBytes();
+                    int rightAvail = rightNode.availableLeafBytes();
+
+                    int remaining = leftAvail
+                        + rightAvail - survivor.pageSize() + Node.TN_HEADER_SIZE;
+
+                    if (remaining < 0) {
+                        // No room to merge.
+                        break tryMerge;
+                    }
+
+                    try {
+                        Node.moveLeafToLeftAndDelete(survivor, leftNode, rightNode);
+                    } catch (Throwable e) {
+                        leftNode.releaseExclusive();
+                        rootNode.releaseExclusive();
+                        throw e;
+                    }
+                } else {
+                    // See TreeCursor.mergeInternal method.
+
+                    /*P*/ byte[] rootPage = rootNode.mPage;
+                    int rootEntryLoc = p_ushortGetLE(rootPage, rootNode.searchVecStart());
+                    int rootEntryLen = Node.keyLengthAtLoc(rootPage, rootEntryLoc);
+
+                    int leftAvail = leftNode.availableInternalBytes();
+                    int rightAvail = rightNode.availableInternalBytes();
+
+                    int remaining = leftAvail - rootEntryLen
+                        + rightAvail - survivor.pageSize() + (Node.TN_HEADER_SIZE - 2);
+
+                    if (remaining < 0) {
+                        // No room to merge.
+                        break tryMerge;
+                    }
+
+                    try {
+                        Node.moveInternalToLeftAndDelete
+                            (survivor, leftNode, rightNode, rootPage, rootEntryLoc, rootEntryLen);
+                    } catch (Throwable e) {
+                        leftNode.releaseExclusive();
+                        rootNode.releaseExclusive();
+                        throw e;
+                    }
+                }
+
+                // Success!
+                rootNode.deleteRightChildRef(2);
+                survivor.rootDelete(leftNode);
+                return survivor;
+            }
+
+            rightNode.releaseExclusive();
+            leftNode.releaseExclusive();
+        }
+
+        rootNode.releaseExclusive();
+
+        return survivor;
+    }
+
+    /**
+     * Called by the graft method.
+     *
+     * @param frame leaf frame
+     * @param stop latched frame to stop at after being cleared (if found)
+     * @param mask ~HIGH_EXTREMITY or ~LOW_EXTREMITY
+     */
+    private static void clearExtremityBits(CursorFrame frame, CursorFrame stop, int mask) {
+        do {
+            if (frame == stop) {
+                Node node = frame.mNode;
+                node.type((byte) (node.type() & mask));
+                break;
+            }
+            Node node = frame.acquireExclusive();
+            node.type((byte) (node.type() & mask));
+            node.releaseExclusive();
+            frame = frame.mParentFrame;
+        } while (frame != null);
     }
 
     @FunctionalInterface
@@ -838,20 +1258,14 @@ class Tree implements View, Index {
                         break toLower;
                     }
                     long childId = node.retrieveChildRefId(pos);
-                    Node child = mDatabase.nodeMapGet(childId);
+                    Node child = mDatabase.nodeMapGetExclusive(childId);
                     if (child != null) {
-                        child.acquireExclusive();
-                        // Need to check again in case evict snuck in.
-                        if (childId != child.mId) {
-                            child.releaseExclusive();
-                        } else {
-                            frame = new CursorFrame(frame);
-                            frame.bind(node, pos);
-                            node.releaseExclusive();
-                            node = child;
-                            pos = 0;
-                            continue toLower;
-                        }
+                        frame = new CursorFrame(frame);
+                        frame.bind(node, pos);
+                        node.releaseExclusive();
+                        node = child;
+                        pos = 0;
+                        continue toLower;
                     }
                     pos += 2;
                 }
@@ -933,6 +1347,103 @@ class Tree implements View, Index {
                     break;
                 }
                 len -= amt;
+            }
+        }
+    }
+
+    private class Primer {
+        private final DataInput mDin;
+        private final int mTaskLimit;
+
+        private int mTaskCount;
+        private boolean mFinished;
+        private IOException mEx;
+
+        Primer(DataInput din) {
+            mDin = din;
+            // TODO: Limit should be based on the concurrency level of the I/O system.
+            // TODO: Cache primer order should be scrambled, to improve cuncurrent priming.
+            mTaskLimit = Runtime.getRuntime().availableProcessors() * 8;
+        }
+
+        void run() throws IOException {
+            synchronized (this) {
+                mTaskCount++;
+            }
+
+            prime();
+
+            // Wait for other task threads to finish.
+            synchronized (this) {
+                while (true) {
+                    if (mEx != null) {
+                        throw mEx;
+                    }
+                    if (mTaskCount <= 0) {
+                        break;
+                    }
+                    try {
+                        wait();
+                    } catch (InterruptedException e) {
+                        throw new InterruptedIOException();
+                    }
+                }
+            }
+        }
+
+        void prime() {
+            try {
+                TreeCursor c = newCursor(Transaction.BOGUS);
+
+                try {
+                    c.mKeyOnly = true;
+
+                    while (true) {
+                        byte[] key;
+
+                        synchronized (this) {
+                            if (mFinished) {
+                                return;
+                            }
+
+                            int len = mDin.readUnsignedShort();
+
+                            if (len == 0xffff) {
+                                mFinished = true;
+                                return;
+                            }
+
+                            key = new byte[len];
+                            mDin.readFully(key);
+
+                            if (mTaskCount < mTaskLimit) spawn: {
+                                Thread task;
+                                try {
+                                    task = new Thread(() -> prime());
+                                } catch (Throwable e) {
+                                    break spawn;
+                                }
+                                mTaskCount++;
+                                task.start();
+                            }
+                        }
+
+                        c.findNearby(key);
+                    }
+                } catch (IOException e) {
+                    synchronized (this) {
+                        if (mEx == null) {
+                            mEx = e;
+                        }
+                    }
+                } finally {
+                    c.reset();
+                }
+            } finally {
+                synchronized (this) {
+                    mTaskCount--;
+                    notifyAll();
+                }
             }
         }
     }
@@ -1036,7 +1547,6 @@ class Tree implements View, Index {
                 return node;
             }
 
-            // TODO: Quick check by trying to latch upwards. Give up if parent is split.
             final CursorFrame parentFrame = frame.mParentFrame;
             node.releaseExclusive();
 
@@ -1068,10 +1578,10 @@ class Tree implements View, Index {
      */
     final void rootDelete(Node child) throws IOException {
         // Allocate stuff early in case of out of memory, and while root is latched. Note that
-        // stub is assigned a NodeUsageList. Because the stub isn't in the list, attempting to
-        // update its position within it has no effect. Note too that the stub isn't placed
-        // into the database node map.
-        Node stub = new Node(mRoot.mUsageList);
+        // stub is assigned a NodeContext. Because the stub isn't in the context usage list,
+        // attempting to update its position within it has no effect. Note too that the stub
+        // isn't placed into the database node map.
+        Node stub = new Node(mRoot.mContext);
 
         // Stub isn't in the node map, so use this pointer field to link the stubs together.
         stub.mNodeMapNext = mStubTail;
@@ -1116,19 +1626,33 @@ class Tree implements View, Index {
     }
 
     /**
+     * Writes to the redo log if defined and the default durability mode isn't NO_REDO.
+     *
      * @return non-zero position if caller should call txnCommitSync
      */
-    final long redoStore(byte[] key, byte[] value) throws IOException {
+    final long redoStoreNullTxn(byte[] key, byte[] value) throws IOException {
         RedoWriter redo = mDatabase.mRedoWriter;
-        return redo == null ? 0 : redo.store(mId, key, value, mDatabase.mDurabilityMode);
+        DurabilityMode mode;
+        if (redo == null || (mode = mDatabase.mDurabilityMode) == DurabilityMode.NO_REDO) {
+            return 0;
+        }
+        return mDatabase.anyTransactionContext().redoStoreAutoCommit
+            (redo.txnRedoWriter(), mId, key, value, mode);
     }
 
     /**
+     * Writes to the redo log if defined.
+     *
+     * @param mode must not be NO_REDO
      * @return non-zero position if caller should call txnCommitSync
      */
-    final long redoStoreNoLock(byte[] key, byte[] value) throws IOException {
+    final long redoStoreNoLock(byte[] key, byte[] value, DurabilityMode mode) throws IOException {
         RedoWriter redo = mDatabase.mRedoWriter;
-        return redo == null ? 0 : redo.storeNoLock(mId, key, value, mDatabase.mDurabilityMode);
+        if (redo == null) {
+            return 0;
+        }
+        return mDatabase.anyTransactionContext().redoStoreNoLockAutoCommit
+            (redo.txnRedoWriter(), mId, key, value, mode);
     }
 
     final void txnCommitSync(LocalTransaction txn, long commitPos) throws IOException {
@@ -1140,109 +1664,5 @@ class Tree implements View, Index {
      */
     final boolean markDirty(Node node) throws IOException {
         return mDatabase.markDirty(this, node);
-    }
-
-    private class Primer {
-        private final DataInput mDin;
-        private final int mTaskLimit;
-
-        private int mTaskCount;
-        private boolean mFinished;
-        private IOException mEx;
-
-        Primer(DataInput din) {
-            mDin = din;
-            // TODO: Limit should be based on the concurrency level of the I/O system.
-            // TODO: Cache primer order should be scrambled, to improve cuncurrent priming.
-            mTaskLimit = Runtime.getRuntime().availableProcessors() * 8;
-        }
-
-        void run() throws IOException {
-            synchronized (this) {
-                mTaskCount++;
-            }
-
-            prime();
-
-            // Wait for other task threads to finish.
-            synchronized (this) {
-                while (true) {
-                    if (mEx != null) {
-                        throw mEx;
-                    }
-                    if (mTaskCount <= 0) {
-                        break;
-                    }
-                    try {
-                        wait();
-                    } catch (InterruptedException e) {
-                        throw new InterruptedIOException();
-                    }
-                }
-            }
-        }
-
-        void prime() {
-            try {
-                Cursor c = newCursor(Transaction.BOGUS);
-
-                try {
-                    c.autoload(false);
-
-                    while (true) {
-                        byte[] key;
-
-                        synchronized (this) {
-                            if (mFinished) {
-                                return;
-                            }
-
-                            int len = mDin.readUnsignedShort();
-
-                            if (len == 0xffff) {
-                                mFinished = true;
-                                return;
-                            }
-
-                            key = new byte[len];
-                            mDin.readFully(key);
-
-                            if (mTaskCount < mTaskLimit) spawn: {
-                                Task task;
-                                try {
-                                    task = new Task();
-                                } catch (Throwable e) {
-                                    break spawn;
-                                }
-                                mTaskCount++;
-                                task.start();
-                            }
-                        }
-
-                        c.findNearby(key);
-                    }
-                } catch (IOException e) {
-                    synchronized (this) {
-                        if (mEx == null) {
-                            mEx = e;
-                        }
-                    }
-                } finally {
-                    c.reset();
-                }
-            } finally {
-                synchronized (this) {
-                    mTaskCount--;
-                    notifyAll();
-                }
-            }
-        }
-
-        class Task extends Thread {
-            @Override
-            public void run() {
-                prime();
-            }
-        }
     }
 }

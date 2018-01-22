@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -78,6 +79,7 @@ final class DurablePageDb extends PageDb {
     */
 
     private static final long MAGIC_NUMBER = 6529720411368701212L;
+    private static final long INCOMPLETE_RESTORE = 1295383629602457917L;
 
     // Indexes of entries in header node.
     private static final int I_MAGIC_NUMBER     = 0;
@@ -102,7 +104,8 @@ final class DurablePageDb extends PageDb {
      * @param cache optional
      * @param crypto optional
      */
-    static DurablePageDb open(boolean explicitPageSize, int pageSize,
+    static DurablePageDb open(EventListener debugListener,
+                              boolean explicitPageSize, int pageSize,
                               File[] files, FileFactory factory, EnumSet<OpenOption> options,
                               PageCache cache, Crypto crypto, boolean destroy)
         throws IOException
@@ -110,7 +113,9 @@ final class DurablePageDb extends PageDb {
         while (true) {
             try {
                 return new DurablePageDb
-                    (openPageArray(pageSize, files, factory, options), cache, crypto, destroy);
+                    (debugListener,
+                     openPageArray(pageSize, files, factory, options),
+                     cache, crypto, destroy);
             } catch (WrongPageSize e) {
                 if (explicitPageSize) {
                     throw e.rethrow();
@@ -125,11 +130,12 @@ final class DurablePageDb extends PageDb {
      * @param cache optional
      * @param crypto optional
      */
-    static DurablePageDb open(PageArray rawArray, PageCache cache, Crypto crypto, boolean destroy)
+    static DurablePageDb open(EventListener debugListener,
+                              PageArray rawArray, PageCache cache, Crypto crypto, boolean destroy)
         throws IOException
     {
         try {
-            return new DurablePageDb(rawArray, cache, crypto, destroy);
+            return new DurablePageDb(debugListener, rawArray, cache, crypto, destroy);
         } catch (WrongPageSize e) {
             throw e.rethrow();
         }
@@ -158,11 +164,19 @@ final class DurablePageDb extends PageDb {
         }
 
         PageArray[] arrays = new PageArray[files.length];
-        for (int i=0; i<files.length; i++) {
-            arrays[i] = new FilePageArray(pageSize, files[i], factory, options);
-        }
 
-        return new StripedPageArray(arrays);
+        try {
+            for (int i=0; i<files.length; i++) {
+                arrays[i] = new FilePageArray(pageSize, files[i], factory, options);
+            }
+
+            return new StripedPageArray(arrays);
+        } catch (Throwable e) {
+            for (PageArray pa : arrays) {
+                closeQuietly(pa);
+            }
+            throw e;
+        }
     }
 
     private static void checkPageSize(int pageSize) {
@@ -172,7 +186,8 @@ final class DurablePageDb extends PageDb {
         }
     }
 
-    private DurablePageDb(final PageArray rawArray, final PageCache cache,
+    private DurablePageDb(final EventListener debugListener,
+                          final PageArray rawArray, final PageCache cache,
                           final Crypto crypto, final boolean destroy)
         throws IOException, WrongPageSize
     {
@@ -193,7 +208,7 @@ final class DurablePageDb extends PageDb {
                 mCommitNumber = -1;
 
                 // Commit twice to ensure both headers have valid data.
-                /*P*/ byte[] header = p_calloc(pageSize);
+                /*P*/ byte[] header = p_calloc(pageSize, isDirectIO());
                 try {
                     mCommitLock.acquireExclusive();
                     try {
@@ -230,6 +245,8 @@ final class DurablePageDb extends PageDb {
                             commitNumber0 = p_intGetLE(header0, I_COMMIT_NUMBER);
                             pageSize0 = p_intGetLE(header0, I_PAGE_SIZE);
                             ex0 = null;
+                        } catch (IncompleteRestoreException e) {
+                            throw e;
                         } catch (CorruptDatabaseException e) {
                             header0 = p_null();
                             commitNumber0 = -1;
@@ -244,6 +261,8 @@ final class DurablePageDb extends PageDb {
                         try {
                             header1 = readHeader(1);
                             commitNumber1 = p_intGetLE(header1, I_COMMIT_NUMBER);
+                        } catch (IncompleteRestoreException e) {
+                            throw e;
                         } catch (CorruptDatabaseException e) {
                             if (ex0 != null) {
                                 // File is completely unusable.
@@ -283,7 +302,13 @@ final class DurablePageDb extends PageDb {
                     mCommitNumber = commitNumber;
                     mHeaderLatch.releaseExclusive();
 
-                    mPageManager = new PageManager(mPageArray, header, I_MANAGER_HEADER);
+                    if (debugListener != null) {
+                        debugListener.notify(EventType.DEBUG, "PAGE_SIZE: %1$d", pageSize);
+                        debugListener.notify(EventType.DEBUG, "COMMIT_NUMBER: %1$d", commitNumber);
+                    }
+
+                    mPageManager = new PageManager
+                        (debugListener, mPageArray, header, I_MANAGER_HEADER);
                 } finally {
                     p_delete(header0);
                     p_delete(header1);
@@ -291,7 +316,7 @@ final class DurablePageDb extends PageDb {
             }
         } catch (WrongPageSize e) {
             delete();
-            closeQuietly(null, this);
+            closeQuietly(this);
             throw e;
         } catch (Throwable e) {
             delete();
@@ -315,6 +340,11 @@ final class DurablePageDb extends PageDb {
     }
 
     @Override
+    public boolean isDirectIO() {
+        return mPageArray.isDirectIO();
+    }
+
+    @Override
     public int allocMode() {
         return 0;
     }
@@ -330,7 +360,7 @@ final class DurablePageDb extends PageDb {
             try {
                 recyclePage(nodeId);
             } catch (Throwable e2) {
-                e.addSuppressed(e2);
+                Utils.suppress(e, e2);
             }
             throw e;
         }
@@ -379,7 +409,7 @@ final class DurablePageDb extends PageDb {
 
     @Override
     public long allocPage() throws IOException {
-        mCommitLock.lock();
+        CommitLock.Shared shared = mCommitLock.acquireShared();
         try {
             return mPageManager.allocPage();
         } catch (DatabaseException e) {
@@ -390,7 +420,7 @@ final class DurablePageDb extends PageDb {
         } catch (Throwable e) {
             throw closeOnFailure(e);
         } finally {
-            mCommitLock.unlock();
+            shared.release();
         }
     }
 
@@ -417,17 +447,17 @@ final class DurablePageDb extends PageDb {
     }
 
     @Override
-    public void deletePage(long id) throws IOException {
+    public void deletePage(long id, boolean force) throws IOException {
         checkId(id);
-        mCommitLock.lock();
+        CommitLock.Shared shared = mCommitLock.acquireShared();
         try {
-            mPageManager.deletePage(id);
+            mPageManager.deletePage(id, force);
         } catch (IOException e) {
             throw e;
         } catch (Throwable e) {
             throw closeOnFailure(e);
         } finally {
-            mCommitLock.unlock();
+            shared.release();
         }
         mPageArray.uncachePage(id);
     }
@@ -435,19 +465,17 @@ final class DurablePageDb extends PageDb {
     @Override
     public void recyclePage(long id) throws IOException {
         checkId(id);
-        mCommitLock.lock();
+        CommitLock.Shared shared = mCommitLock.acquireShared();
         try {
             try {
                 mPageManager.recyclePage(id);
             } catch (IOException e) {
-                mPageManager.deletePage(id);
+                mPageManager.deletePage(id, true);
             }
-        } catch (IOException e) {
-            throw e;
         } catch (Throwable e) {
             throw closeOnFailure(e);
         } finally {
-            mCommitLock.unlock();
+            shared.release();
         }
     }
 
@@ -466,13 +494,13 @@ final class DurablePageDb extends PageDb {
         }
 
         for (int i=0; i<pageCount; i++) {
-            mCommitLock.lock();
+            CommitLock.Shared shared = mCommitLock.acquireShared();
             try {
                 mPageManager.allocAndRecyclePage();
             } catch (Throwable e) {
                 throw closeOnFailure(e);
             } finally {
-                mCommitLock.unlock();
+                shared.release();
             }
         }
 
@@ -496,12 +524,12 @@ final class DurablePageDb extends PageDb {
 
     @Override
     public void scanFreeList(LongConsumer dst) throws IOException {
-        mCommitLock.lock();
+        CommitLock.Shared shared = mCommitLock.acquireShared();
         try {
             scanFreeList(I_MANAGER_HEADER + PageManager.I_REGULAR_QUEUE, dst);
             scanFreeList(I_MANAGER_HEADER + PageManager.I_RECYCLE_QUEUE, dst);
         } finally {
-            mCommitLock.unlock();
+            shared.release();
         }
     }
 
@@ -571,7 +599,7 @@ final class DurablePageDb extends PageDb {
     {
         // Acquire a shared lock to prevent concurrent commits after callback has released
         // exclusive lock.
-        mCommitLock.lock();
+        CommitLock.Shared shared = mCommitLock.acquireShared();
 
         try {
             mHeaderLatch.acquireShared();
@@ -601,7 +629,7 @@ final class DurablePageDb extends PageDb {
                 throw closeOnFailure(e);
             }
         } finally {
-            mCommitLock.unlock();
+            shared.release();
         }
     }
 
@@ -666,7 +694,7 @@ final class DurablePageDb extends PageDb {
         mHeaderLatch.acquireShared();
         try {
             long pageCount, redoPos;
-            /*P*/ byte[] header = p_alloc(MINIMUM_PAGE_SIZE);
+            /*P*/ byte[] header = p_alloc(MINIMUM_PAGE_SIZE, isDirectIO());
             try {
                 mPageArray.readPage(mCommitNumber & 1, header, 0, MINIMUM_PAGE_SIZE);
                 pageCount = PageManager.readTotalPageCount(header, I_MANAGER_HEADER);
@@ -691,58 +719,53 @@ final class DurablePageDb extends PageDb {
                                       PageCache cache, Crypto crypto, InputStream in)
         throws IOException
     {
-        if (options.contains(OpenOption.READ_ONLY)) {
-            throw new DatabaseException("Cannot restore into a read-only file");
-        }
-
-        byte[] buffer;
-        /*P*/ byte[] bufferPage;
-        PageArray pa;
-        long index = 0;
-
-        if (crypto != null) {
-            buffer = new byte[pageSize];
-            bufferPage = p_transfer(buffer);
-            pa = openPageArray(pageSize, files, factory, options);
-            if (!pa.isEmpty()) {
-                throw new DatabaseException("Cannot restore into a non-empty file");
-            }
-        } else {
-            // Figure out what the actual page size is.
-
-            buffer = new byte[MINIMUM_PAGE_SIZE];
-            readFully(in, buffer, 0, buffer.length);
-
-            long magic = decodeLongLE(buffer, I_MAGIC_NUMBER);
-            if (magic != MAGIC_NUMBER) {
-                throw new CorruptDatabaseException("Wrong magic number: " + magic);
+        try {
+            if (options.contains(OpenOption.READ_ONLY)) {
+                throw new DatabaseException("Cannot restore into a read-only file");
             }
 
+            byte[] buffer;
+
+            if (crypto != null) {
+                buffer = new byte[pageSize];
+                readFully(in, buffer, 0, buffer.length);
+                try {
+                    crypto.decryptPage(0, pageSize, buffer, 0);
+                } catch (GeneralSecurityException e) {
+                    throw new DatabaseException(e);
+                }
+            } else {
+                // Start the with minimum page size and figure out what the actual size is.
+                buffer = new byte[MINIMUM_PAGE_SIZE];
+                readFully(in, buffer, 0, buffer.length);
+            }
+
+            checkMagicNumber(decodeLongLE(buffer, I_MAGIC_NUMBER));
             pageSize = decodeIntLE(buffer, I_PAGE_SIZE);
-            pa = openPageArray(pageSize, files, factory, options);
+            PageArray pa = openPageArray(pageSize, files, factory, options);
 
             if (!pa.isEmpty()) {
+                closeQuietly(pa);
                 throw new DatabaseException("Cannot restore into a non-empty file");
             }
 
             if (pageSize != buffer.length) {
-                byte[] newBuffer = new byte[pageSize];
-                arraycopy(buffer, 0, newBuffer, 0, buffer.length);
-                readFully(in, newBuffer, buffer.length, pageSize - buffer.length);
-                buffer = newBuffer;
+                if (crypto != null) {
+                    closeQuietly(pa);
+                    throw new CorruptDatabaseException
+                        ("Mismatched page size: " + pageSize + " != " + buffer.length);
+                } else {
+                    byte[] newBuffer = new byte[pageSize];
+                    arraycopy(buffer, 0, newBuffer, 0, buffer.length);
+                    readFully(in, newBuffer, buffer.length, pageSize - buffer.length);
+                    buffer = newBuffer;
+                }
             }
 
-            bufferPage = p_transfer(buffer);
-            try {
-                pa.writePage(index, bufferPage);
-                index++;
-            } catch (Throwable e) {
-                p_delete(bufferPage);
-                throw e;
-            }
+            return restoreFromSnapshot(cache, crypto, in, buffer, pa);
+        } finally {
+            closeQuietly(in);
         }
-
-        return restoreFromSnapshot(cache, crypto, in, buffer, bufferPage, pa, index);
     }
 
     /**
@@ -753,42 +776,108 @@ final class DurablePageDb extends PageDb {
     static PageDb restoreFromSnapshot(PageArray pa, PageCache cache, Crypto crypto, InputStream in)
         throws IOException
     {
-        if (!pa.isEmpty()) {
-            throw new DatabaseException("Cannot restore into a non-empty file");
+        try {
+            if (!pa.isEmpty()) {
+                closeQuietly(pa);
+                throw new DatabaseException("Cannot restore into a non-empty file");
+            }
+
+            byte[] buffer = new byte[pa.pageSize()];
+            readFully(in, buffer, 0, buffer.length);
+
+            try {
+                crypto.decryptPage(0, buffer.length, buffer, 0);
+            } catch (GeneralSecurityException e) {
+                throw new DatabaseException(e);
+            }
+
+            checkMagicNumber(decodeLongLE(buffer, I_MAGIC_NUMBER));
+            int pageSize = decodeIntLE(buffer, I_PAGE_SIZE);
+
+            if (pageSize != buffer.length) {
+                closeQuietly(pa);
+                throw new CorruptDatabaseException
+                    ("Mismatched page size: " + pageSize + " != " + buffer.length);
+            }
+
+            return restoreFromSnapshot(cache, crypto, in, buffer, pa);
+        } finally {
+            closeQuietly(in);
         }
-
-        byte[] buffer = new byte[pa.pageSize()];
-        /*P*/ byte[] bufferPage = p_transfer(buffer);
-
-        return restoreFromSnapshot(cache, crypto, in, buffer, bufferPage, pa, 0);
     }
 
+    /**
+     * @param buffer initialized with page 0 (first header)
+     */
     private static PageDb restoreFromSnapshot(PageCache cache, Crypto crypto, InputStream in,
-                                              byte[] buffer, /*P*/ byte[] bufferPage,
-                                              PageArray pa, long index)
+                                              byte[] buffer, PageArray pa)
         throws IOException
     {
+        // Indicate that a restore is in progress. Replace with the correct magic number when
+        // complete.
+        encodeLongLE(buffer, I_MAGIC_NUMBER, INCOMPLETE_RESTORE);
+
+        if (crypto != null) {
+            try {
+                crypto.encryptPage(0, pa.pageSize(), buffer, 0);
+            } catch (GeneralSecurityException e) {
+                closeQuietly(pa);
+                throw new DatabaseException(e);
+            }
+        }
+
+        /*P*/ byte[] bufferPage = p_transfer(buffer, pa.isDirectIO());
+
         try {
+            // Write header and ensure that the incomplete restore state is persisted.
+            pa.writePage(0, bufferPage);
+            pa.sync(false);
+
+            long index = 1;
             while (true) {
-                try {
-                    readFully(in, buffer, 0, buffer.length);
-                } catch (EOFException e) {
+                int amt = in.read(buffer);
+                if (amt < 0) {
                     break;
                 }
+                readFully(in, buffer, amt, buffer.length - amt);
                 pa.writePage(index, p_transferTo(buffer, bufferPage));
                 index++;
             }
 
+            // Store proper magic number, indicating that the restore is complete. All data
+            // pages must be durable before doing this.
+
+            pa.sync(false);
+            pa.readPage(0, bufferPage);
+
+            try {
+                if (crypto != null) {
+                    crypto.decryptPage(0, pa.pageSize(), bufferPage, 0);
+                }
+
+                p_longPutLE(bufferPage, I_MAGIC_NUMBER, MAGIC_NUMBER);
+
+                if (crypto != null) {
+                    crypto.encryptPage(0, pa.pageSize(), bufferPage, 0);
+                }
+            } catch (GeneralSecurityException e) {
+                throw new DatabaseException(e);
+            }
+
+            pa.writePage(0, bufferPage);
+
             // Ensure newly restored snapshot is durable and also ensure that PageArray (if a
             // MappedPageArray) no longer considers itself to be empty.
             pa.sync(true);
+        } catch (Throwable e) {
+            closeQuietly(pa);
+            throw e;
         } finally {
             p_delete(bufferPage);
-            closeQuietly(null, in);
         }
 
         try {
-            return new DurablePageDb(pa, cache, crypto, false);
+            return new DurablePageDb(null, pa, cache, crypto, false);
         } catch (WrongPageSize e) {
             throw e.rethrow();
         }
@@ -854,7 +943,7 @@ final class DurablePageDb extends PageDb {
     }
 
     private /*P*/ byte[] readHeader(int id) throws IOException {
-        /*P*/ byte[] header = p_alloc(MINIMUM_PAGE_SIZE);
+        /*P*/ byte[] header = p_alloc(MINIMUM_PAGE_SIZE, isDirectIO());
 
         try {
             try {
@@ -863,10 +952,7 @@ final class DurablePageDb extends PageDb {
                 throw new CorruptDatabaseException("File is smaller than expected");
             }
 
-            long magic = p_longGetLE(header, I_MAGIC_NUMBER);
-            if (magic != MAGIC_NUMBER) {
-                throw new CorruptDatabaseException("Wrong magic number: " + magic);
-            }
+            checkMagicNumber(p_longGetLE(header, I_MAGIC_NUMBER));
 
             int checksum = p_intGetLE(header, I_CHECKSUM);
 
@@ -886,12 +972,31 @@ final class DurablePageDb extends PageDb {
     private void readPartial(long index, int start, byte[] buf, int offset, int length)
         throws IOException
     {
-        /*P*/ byte[] page = p_alloc(start + length);
+        /*P*/ byte[] page;
+        int readLen;
+
+        if (isDirectIO()) {
+            readLen = pageSize();
+            page = p_alloc(readLen, true);
+        } else {
+            readLen = start + length;
+            page = p_alloc(readLen, false);
+        }
+
         try {
-            mPageArray.readPage(index, page, 0, start + length);
+            mPageArray.readPage(index, page, 0, readLen);
             p_copyToArray(page, start, buf, offset, length);
         } finally {
             p_delete(page);
+        }
+    }
+
+    private static void checkMagicNumber(long magic) throws CorruptDatabaseException {
+        if (magic != MAGIC_NUMBER) {
+            if (magic == INCOMPLETE_RESTORE) {
+                throw new IncompleteRestoreException();
+            }
+            throw new CorruptDatabaseException("Wrong magic number: " + magic);
         }
     }
 }

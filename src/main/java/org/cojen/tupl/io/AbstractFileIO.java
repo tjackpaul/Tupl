@@ -1,34 +1,32 @@
 /*
- *  Copyright 2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl.io;
 
 import java.io.InterruptedIOException;
-import java.lang.reflect.Field;
 import java.io.IOException;
 
 import java.nio.ByteBuffer;
-
 import java.util.EnumSet;
 
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import org.cojen.tupl.util.Latch;
-
-import sun.misc.Unsafe;
+import org.cojen.tupl.util.RWLock;
 
 import static org.cojen.tupl.io.Utils.rethrow;
 
@@ -37,6 +35,7 @@ import static org.cojen.tupl.io.Utils.rethrow;
  *
  * @author Brian S O'Neill
  */
+@SuppressWarnings("restriction")
 abstract class AbstractFileIO extends FileIO {
     private static final int PAGE_SIZE;
 
@@ -46,16 +45,16 @@ abstract class AbstractFileIO extends FileIO {
     // If sync is taking longer than 10 seconds, start slowing down access.
     private static final long SYNC_YIELD_THRESHOLD_NANOS = 10L * 1000 * 1000 * 1000;
 
-    private static final AtomicIntegerFieldUpdater<AbstractFileIO> cSyncCountUpdater =
-        AtomicIntegerFieldUpdater.newUpdater(AbstractFileIO.class, "mSyncCount");
+    // Max amount of time to stall access if sync is taking longer than the threshold above.
+    private static final long SYNC_YIELD_MAX_NANOS = 100L * 1000 * 1000;
+
+    private static final AtomicLongFieldUpdater<AbstractFileIO> cSyncStartNanosUpdater =
+        AtomicLongFieldUpdater.newUpdater(AbstractFileIO.class, "mSyncStartNanos");
 
     static {
         int pageSize = 4096;
         try {
-            Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
-            theUnsafe.setAccessible(true);
-            Unsafe unsafe = (Unsafe) theUnsafe.get(null);
-            pageSize = unsafe.pageSize();
+            pageSize = UnsafeAccess.tryObtain().pageSize();
         } catch (Throwable e) {
             // Ignore. Use default value.
         }
@@ -63,28 +62,20 @@ abstract class AbstractFileIO extends FileIO {
     }
 
     private final boolean mReadOnly;
-    private final boolean mPreallocate;
-    private final ResizeLatch mResizeLatch;
-
     private final Latch mRemapLatch;
-    private final Latch mMappingLatch;
+    protected final RWLock mAccessLock;
+    private final Latch mSyncLatch;
     private Mapping[] mMappings;
     private int mLastMappingSize;
-
-    private final Latch mSyncLatch;
-    private volatile int mSyncCount;
-    private volatile long mSyncStartNanos;
-
     protected volatile Throwable mCause;
+
+    private volatile long mSyncStartNanos;
 
     AbstractFileIO(EnumSet<OpenOption> options) {
         mReadOnly = options.contains(OpenOption.READ_ONLY);
-        mPreallocate = options.contains(OpenOption.PREALLOCATE);
         mRemapLatch = new Latch();
-        mMappingLatch = new Latch();
+        mAccessLock = new RWLock();
         mSyncLatch = new Latch();
-
-        mResizeLatch = mPreallocate ? new ResizeLatch() : ResizeLatch.NONE;
     }
 
     @Override
@@ -94,18 +85,18 @@ abstract class AbstractFileIO extends FileIO {
 
     @Override
     public final long length() throws IOException {
-        mMappingLatch.acquireShared();
+        mAccessLock.acquireShared();
         try {
             return doLength();
         } catch (IOException e) {
             throw rethrow(e, mCause);
         } finally {
-            mMappingLatch.releaseShared();
+            mAccessLock.releaseShared();
         }
     }
 
     @Override
-    public final void setLength(long length) throws IOException {
+    public final void setLength(long length, LengthOption option) throws IOException {
         mRemapLatch.acquireExclusive();
         try {
             final long prevLength = length();
@@ -121,28 +112,31 @@ abstract class AbstractFileIO extends FileIO {
             }
 
             try {
-                if (mPreallocate && prevLength < length) {
+                Throwable ex = null;
+
+                if (length > prevLength && shouldPreallocate(option)) {
                     // Increasing the file length. Assume that blocks up to the
                     // previous length have already been allocated, and try and 
                     // preallocate for the extended range from prevLength to new length.
-                    // 
-                    // Any existing mapping has an upper bound of prevLength. Concurrent
-                    // writes above that will go through the unmapped doWrite path. The
-                    // exclusive resize latch blocks only unmapped writes. Concurrent
-                    // writes to the mapped range should be safe since that range does not
-                    // intersect the range we're touching. 
-                    //
-                    // TODO: If the file is not mapped then this blocks all writes. Consider
-                    // locking just the range between prevLength and length to allow concurrent
-                    // writers outside the extension range.
-                    mResizeLatch.acquireExclusive();
                     try {
-                        preallocate(prevLength, length - prevLength);
-                    } finally {
-                        mResizeLatch.releaseExclusive();
+                        doPreallocate(prevLength, length - prevLength);
+                    } catch (Throwable e) {
+                        ex = e;
+                        // Rollback any partial allocation.
+                        length = prevLength;
                     }
                 }
-                doSetLength(length);
+
+                mAccessLock.acquireShared();
+                try {
+                    doSetLength(length);
+                } finally {
+                    mAccessLock.releaseShared();
+                }
+
+                if (ex != null) {
+                    throw Utils.rethrow(ex);
+                }
             } catch (IOException e) {
                 // Ignore.
             } finally {
@@ -191,7 +185,7 @@ abstract class AbstractFileIO extends FileIO {
         syncWait();
 
         try {
-            mMappingLatch.acquireShared();
+            mAccessLock.acquireShared();
             try {
                 Mapping[] mappings = mMappings;
                 if (mappings != null) {
@@ -234,19 +228,14 @@ abstract class AbstractFileIO extends FileIO {
                         offset += mavail;
                     }
                 }
-            } finally {
-                mMappingLatch.releaseShared();
-            }
 
-            if (read) {
-                doRead(pos, buf, offset, length);
-            } else {
-                mResizeLatch.acquireShared();
-                try {
+                if (read) {
+                    doRead(pos, buf, offset, length);
+                } else {
                     doWrite(pos, buf, offset, length);
-                } finally {
-                    mResizeLatch.releaseShared();
                 }
+            } finally {
+                mAccessLock.releaseShared();
             }
         } catch (IOException e) {
             throw rethrow(e, mCause);
@@ -261,7 +250,7 @@ abstract class AbstractFileIO extends FileIO {
         syncWait();
 
         try {
-            mMappingLatch.acquireShared();
+            mAccessLock.acquireShared();
             try {
                 Mapping[] mappings = mMappings;
                 if (mappings != null) {
@@ -309,20 +298,16 @@ abstract class AbstractFileIO extends FileIO {
                         pos += mavail;
                     }
                 }
+
+                if (read) {
+                    doRead(pos, bb);
+                } else {
+                    doWrite(pos, bb);
+                }
             } finally {
-                mMappingLatch.releaseShared();
+                mAccessLock.releaseShared();
             }
 
-            if (read) {
-                doRead(pos, bb);
-            } else {
-                mResizeLatch.acquireShared();
-                try {
-                    doWrite(pos, bb);
-                } finally {
-                    mResizeLatch.releaseShared();
-                }
-            }
         } catch (IOException e) {
             throw rethrow(e, mCause);
         }
@@ -340,15 +325,15 @@ abstract class AbstractFileIO extends FileIO {
             return;
         }
 
-        int count = cSyncCountUpdater.getAndIncrement(this);
+        // Set the start time if there's not already an ongoing sync. Ignore
+        // cas fails; first writer wins.
+        long startNs = mSyncStartNanos;
+        boolean shouldReset = startNs == 0 && 
+            cSyncStartNanosUpdater.compareAndSet(this, startNs, System.nanoTime());
         try {
-            if (count == 0) {
-                mSyncStartNanos = System.nanoTime();
-            }
-
             mSyncLatch.acquireShared();
             try {
-                mMappingLatch.acquireShared();
+                mAccessLock.acquireShared();
                 try {
                     Mapping[] mappings = mMappings;
                     if (mappings != null) {
@@ -357,18 +342,21 @@ abstract class AbstractFileIO extends FileIO {
                             m.sync(false);
                         }
                     }
-                } finally {
-                    mMappingLatch.releaseShared();
-                }
 
-                doSync(metadata);
+                    doSync(metadata);
+                } finally {
+                    mAccessLock.releaseShared();
+                }
             } catch (IOException e) {
                 throw rethrow(e, mCause);
             } finally {
                 mSyncLatch.releaseShared();
             }
         } finally {
-            cSyncCountUpdater.decrementAndGet(this);
+            // Reset sync state to unblock read/write ops.
+            if (shouldReset) {
+                cSyncStartNanosUpdater.set(this, 0);
+            }
         }
     }
 
@@ -408,7 +396,8 @@ abstract class AbstractFileIO extends FileIO {
 
     // Caller must hold mRemapLatch exclusively.
     private void doUnmap(boolean reopen) throws IOException {
-        mMappingLatch.acquireExclusive();
+        boolean contended = mAccessLock.isContended();
+        mAccessLock.acquireExclusive();
         try {
             Mapping[] mappings = mMappings;
             if (mappings == null) {
@@ -440,7 +429,7 @@ abstract class AbstractFileIO extends FileIO {
                 throw ex;
             }
         } finally {
-            mMappingLatch.releaseExclusive();
+            mAccessLock.releaseExclusive(contended);
         }
     }
 
@@ -451,7 +440,7 @@ abstract class AbstractFileIO extends FileIO {
         Mapping[] newMappings;
         int newLastSize;
 
-        mMappingLatch.acquireShared();
+        mAccessLock.acquireShared();
         try {
             oldMappings = mMappings;
             if (oldMappings == null && remap) {
@@ -459,7 +448,7 @@ abstract class AbstractFileIO extends FileIO {
                 return;
             }
 
-            long length = length();
+            long length = doLength();
 
             if (oldMappings != null) {
                 long oldMappedLength = oldMappings.length == 0 ? 0 :
@@ -509,13 +498,14 @@ abstract class AbstractFileIO extends FileIO {
                 newMappings[i] = openMapping(mReadOnly, pos, newLastSize);
             }
         } finally {
-            mMappingLatch.releaseShared();
+            mAccessLock.releaseShared();
         }
 
-        mMappingLatch.acquireExclusive();
+        boolean contended = mAccessLock.isContended();
+        mAccessLock.acquireExclusive();
         mMappings = newMappings;
         mLastMappingSize = newLastSize;
-        mMappingLatch.releaseExclusive();
+        mAccessLock.releaseExclusive(contended);
 
         if (oldMappings != null) {
             IOException ex = null;
@@ -529,12 +519,13 @@ abstract class AbstractFileIO extends FileIO {
     }
  
     protected void syncWait() throws InterruptedIOException {
-        if (mSyncCount != 0) {
-            long syncTimeNanos = System.nanoTime() - mSyncStartNanos;
+        long syncStartNanos;
+        if ((syncStartNanos = mSyncStartNanos) != 0) {
+            long syncTimeNanos = System.nanoTime() - syncStartNanos;
             if (syncTimeNanos > SYNC_YIELD_THRESHOLD_NANOS) {
                 // Yield 1ms for each second that sync has been running. Use a latch instead
                 // of a sleep, preventing prolonged sleep after sync finishes.
-                long sleepNanos = syncTimeNanos / 1000L;
+                long sleepNanos = Math.min(syncTimeNanos / 1000L, SYNC_YIELD_MAX_NANOS);
                 try {
                     if (mSyncLatch.tryAcquireExclusiveNanos(sleepNanos)) {
                         mSyncLatch.releaseExclusive();
@@ -546,61 +537,45 @@ abstract class AbstractFileIO extends FileIO {
         }
     }
 
-    @Override
-    void preallocate(long pos, long length) throws IOException {
-        // Expecting block size to be >= page size. If block size is smaller than page 
-        // size then this will not touch all the necessary blocks.
-        final long currLength = length();
-        byte[] buf = new byte[1];
-        for (long endPos = pos + length; pos < endPos; pos += PAGE_SIZE) {
-            // In order not to be destructive to existing data we read the byte
-            // at the given offset. If it is non-zero then assume the block 
-            // must have been allocated already.
-            if (pos < currLength) {
-                doRead(pos, buf, 0, 1);
-
-                if (buf[0] != 0) {
-                    continue;
-                }
-            }
-
-            // Found zero byte. Either data at pos is really zero, or the block has not been 
-            // allocated yet. Overwrite with zero again to force any block allocation. 
-            doWrite(pos, buf, 0, buf.length);
-        }
+    protected boolean shouldPreallocate(LengthOption option) {
+        return option == LengthOption.PREALLOCATE_ALWAYS;
     }
 
-    private static class ResizeLatch {
-        /** 
-         * No-op latch used when preallocation is disabled. Calls to this
-         * instance should get optimized away.
-         */
-        private static final ResizeLatch NONE = new ResizeLatch() {
-            @Override public void acquireExclusive() { }
+    /**
+     * Preallocates blocks to the file. This call ensures that disk space is allocated 
+     * for this file for the bytes in the range starting at offset and continuing for 
+     * length bytes.  Subsequent writes to the specified range are guaranteed not to 
+     * fail because of lack of disk space.
+     *
+     * @param pos zero-based position in file.
+     * @param length amount of bytes to preallocate starting at pos.
+     * @throws IllegalArgumentException
+     */
+    protected void doPreallocate(long pos, long length) throws IOException {
+        mAccessLock.acquireExclusive();
+        try {
+            // Expecting block size to be >= page size. If block size is smaller than page 
+            // size then this will not touch all the necessary blocks.
+            final long currLength = doLength();
+            byte[] buf = new byte[1];
+            for (long endPos = pos + length; pos < endPos; pos += PAGE_SIZE) {
+                // In order not to be destructive to existing data we read the byte
+                // at the given offset. If it is non-zero then assume the block 
+                // must have been allocated already.
+                if (pos < currLength) {
+                    doRead(pos, buf, 0, 1);
 
-            @Override public void releaseExclusive() { }
+                    if (buf[0] != 0) {
+                        continue;
+                    }
+                }
 
-            @Override public void acquireShared() { }
-
-            @Override public void releaseShared() { }
-        };
-
-        private final Latch mLatch = new Latch();
-
-        public void acquireExclusive() {
-            mLatch.acquireExclusive();
-        }
-
-        public void releaseExclusive() {
-            mLatch.releaseExclusive();
-        }
-
-        public void acquireShared() {
-            mLatch.acquireShared();
-        }
-
-        public void releaseShared() {
-            mLatch.releaseShared();
+                // Found zero byte. Either data at pos is really zero, or the block has not been 
+                // allocated yet. Overwrite with zero again to force any block allocation. 
+                doWrite(pos, buf, 0, buf.length);
+            }
+        } finally {
+            mAccessLock.releaseExclusive();
         }
     }
 
@@ -629,6 +604,7 @@ abstract class AbstractFileIO extends FileIO {
     protected abstract Mapping openMapping(boolean readOnly, long pos, int size)
         throws IOException;
 
+    // Called with mAccessLock held exclusively.
     protected abstract void reopen() throws IOException;
 
     protected abstract void doSync(boolean metadata) throws IOException;

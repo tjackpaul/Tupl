@@ -1,17 +1,18 @@
 /*
- *  Copyright 2016 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -35,10 +36,13 @@ class NonReplicationManager implements ReplicationManager {
     private int mState;
     private NonWriter mWriter;
 
-    synchronized void asReplica() {
+    synchronized void asReplica() throws InterruptedException {
         mState = REPLICA;
         if (mWriter != null) {
             mWriter.close();
+            while (mWriter != null) {
+                wait();
+            }
         }
         notifyAll();
     }
@@ -58,10 +62,6 @@ class NonReplicationManager implements ReplicationManager {
     }
 
     @Override
-    public void recover(EventListener listener) {
-    }
-
-    @Override
     public long readPosition() {
         return 0;
     }
@@ -72,15 +72,11 @@ class NonReplicationManager implements ReplicationManager {
             while (mState == REPLICA) {
                 wait();
             }
+            mWriter = new NonWriter();
             return -1;
         } catch (InterruptedException e) {
             throw new InterruptedIOException();
         }
-    }
-
-    @Override
-    public synchronized void flip() {
-        mWriter = mState == LEADER ? new NonWriter() : null;
     }
 
     @Override
@@ -106,14 +102,26 @@ class NonReplicationManager implements ReplicationManager {
         notifyAll();
     }
 
+    synchronized void toReplica() {
+        mState = REPLICA;
+        mWriter = null;
+        notifyAll();
+    }
+
     private class NonWriter implements Writer {
         private final List<Runnable> mCallbacks = new ArrayList<>();
 
         private boolean mClosed;
+        private long mPosition;
 
         @Override
-        public long position() {
-            return 0;
+        public synchronized long position() {
+            return mPosition;
+        }
+
+        @Override
+        public synchronized long confirmedPosition() {
+            return mPosition;
         }
 
         @Override
@@ -127,13 +135,41 @@ class NonReplicationManager implements ReplicationManager {
         }
 
         @Override
-        public synchronized long write(byte[] b, int off, int len) {
-            return mClosed ? -1 : 0;
+        public synchronized boolean write(byte[] b, int off, int len, long commitPos) {
+            if (mClosed) {
+                return false;
+            }
+            mPosition += len;
+            // Confirm method is called by checkpointer and main thread.
+            notifyAll();
+            return true;
         }
 
         @Override
         public synchronized boolean confirm(long position, long timeoutNanos) {
-            return !mClosed;
+            while (true) {
+                if (mPosition >= position) {
+                    return true;
+                }
+                if (mClosed) {
+                    return false;
+                }
+                try {
+                    wait();
+                } catch (InterruptedException e) {
+                }
+            }
+        }
+
+        @Override
+        public synchronized long confirmEnd(long timeoutNanos)
+            throws ConfirmationFailureException
+        {
+            if (!mClosed) {
+                throw new ConfirmationFailureException("Not closed");
+            }
+            toReplica();
+            return mPosition;
         }
 
         synchronized void close() {
@@ -141,6 +177,7 @@ class NonReplicationManager implements ReplicationManager {
             for (Runnable r : mCallbacks) {
                 r.run();
             }
+            notifyAll();
         }
     }
 }

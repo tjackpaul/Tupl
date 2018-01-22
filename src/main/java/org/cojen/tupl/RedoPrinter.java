@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -27,7 +28,7 @@ class RedoPrinter implements RedoVisitor {
     public static void main(String[] args) throws Exception {
         java.io.File baseFile = new java.io.File(args[0]);
         long logId = Long.parseLong(args[1]);
-        new RedoLog(null, baseFile, null, logId, 0, true)
+        new RedoLog(null, baseFile, null, logId, 0, null)
             .replay(new RedoPrinter(), null, null, null);
     }
 
@@ -70,6 +71,12 @@ class RedoPrinter implements RedoVisitor {
     }
 
     @Override
+    public boolean control(byte[] message) {
+        mOut.println("control: message=" + toHex(message));
+        return true;
+    }
+
+    @Override
     public boolean store(long indexId, byte[] key, byte[] value) {
         mOut.println("store: indexId=" + indexId +
                      ", key=" + toHex(key) + ", value=" + toHex(value));
@@ -93,6 +100,12 @@ class RedoPrinter implements RedoVisitor {
     @Override
     public boolean deleteIndex(long txnId, long indexId) {
         mOut.println("deleteIndex: txnId=" + txnId + ", indexId=" + indexId);
+        return true;
+    }
+
+    @Override
+    public boolean txnPrepare(long txnId) {
+        mOut.println("txnPrepare: txnId=" + txnId);
         return true;
     }
 
@@ -127,6 +140,13 @@ class RedoPrinter implements RedoVisitor {
     }
 
     @Override
+    public boolean txnEnterStore(long txnId, long indexId, byte[] key, byte[] value) {
+        txnEnter(txnId);
+        txnStore(txnId, indexId, key, value);
+        return true;
+    }
+
+    @Override
     public boolean txnStore(long txnId, long indexId, byte[] key, byte[] value) {
         mOut.println("txnStore: txnId=" + txnId + ", indexId=" + indexId +
                      ", key=" + toHex(key) + ", value=" + toHex(value));
@@ -134,9 +154,85 @@ class RedoPrinter implements RedoVisitor {
     }
 
     @Override
-    public boolean txnStoreCommitFinal(long txnId, long indexId, byte[] key, byte[] value) {
+    public boolean txnStoreCommit(long txnId, long indexId, byte[] key, byte[] value) {
         txnStore(txnId, indexId, key, value);
         return txnCommit(txnId);
+    }
+
+    @Override
+    public boolean txnStoreCommitFinal(long txnId, long indexId, byte[] key, byte[] value) {
+        txnStore(txnId, indexId, key, value);
+        return txnCommitFinal(txnId);
+    }
+
+    @Override
+    public boolean cursorRegister(long cursorId, long indexId) {
+        mOut.println("cursorRegister: cursorId=" + cursorId + ", indexId=" + indexId);
+        return true;
+    }
+
+    @Override
+    public boolean cursorUnregister(long cursorId) {
+        mOut.println("cursorUnregister: cursorId=" + cursorId);
+        return true;
+    }
+
+    @Override
+    public boolean cursorStore(long cursorId, long txnId, byte[] key, byte[] value) {
+        mOut.println("cursorStore: cursorId=" + cursorId + ", txnId=" + txnId +
+                     ", key=" + toHex(key) + ", value=" + toHex(value));
+        return true;
+    }
+
+    @Override
+    public boolean cursorFind(long cursorId, long txnId, byte[] key) {
+        mOut.println("cursorFind: cursorId=" + cursorId + ", txnId=" + txnId +
+                     ", key=" + toHex(key));
+        return true;
+    }
+
+    @Override
+    public boolean cursorValueSetLength(long cursorId, long txnId, long length) {
+        mOut.println("cursorValueSetLength: cursorId=" + cursorId + ", txnId=" + txnId +
+                     ", length=" + length);
+        return true;
+    }
+
+    @Override
+    public boolean cursorValueWrite(long cursorId, long txnId,
+                                    long pos, byte[] buf, int off, int len)
+    {
+        mOut.println("cursorValueWrite: cursorId=" + cursorId + ", txnId=" + txnId +
+                     ", pos=" + pos + ", value=" + toHex(buf, off, len));
+        return true;
+    }
+
+    @Override
+    public boolean cursorValueClear(long cursorId, long txnId, long pos, long length) {
+        mOut.println("cursorValueClear: cursorId=" + cursorId + ", txnId=" + txnId +
+                     ", pos=" + pos + ", length=" + length);
+        return true;
+    }
+
+    @Override
+    public boolean txnLockShared(long txnId, long indexId, byte[] key) {
+        mOut.println("txnLockShared: txnId=" + txnId + ", indexId=" + indexId +
+                     ", key=" + toHex(key));
+        return true;
+    }
+
+    @Override
+    public boolean txnLockUpgradable(long txnId, long indexId, byte[] key) {
+        mOut.println("txnLockUpgradable: txnId=" + txnId + ", indexId=" + indexId +
+                     ", key=" + toHex(key));
+        return true;
+    }
+
+    @Override
+    public boolean txnLockExclusive(long txnId, long indexId, byte[] key) {
+        mOut.println("txnLockExclusive: txnId=" + txnId + ", indexId=" + indexId +
+                     ", key=" + toHex(key));
+        return true;
     }
 
     @Override
@@ -152,33 +248,37 @@ class RedoPrinter implements RedoVisitor {
         return true;
     }
 
-    private String toHex(byte[] bytes) {
+    private static String toHex(byte[] bytes) {
+        return toHex(bytes, 0, bytes.length);
+    }
+
+    private static String toHex(byte[] bytes, int offset, int length) {
         if (bytes == null) {
             return "null";
         }
         StringBuilder bob;
         int len;
-        if (bytes.length <= MAX_VALUE) {
-            len = bytes.length;
+        if (length <= MAX_VALUE) {
+            len = length;
             bob = new StringBuilder(len * 2);
         } else {
             len = MAX_VALUE;
             bob = new StringBuilder(len * 2 + 3);
         }
         for (int i=0; i<len; i++) {
-            int b = bytes[i] & 0xff;
+            int b = bytes[offset + i] & 0xff;
             if (b < 16) {
                 bob.append('0');
             }
             bob.append(Integer.toHexString(b));
         }
-        if (bytes.length > MAX_VALUE) {
-            bob.append("...");
+        if (length > MAX_VALUE) {
+            bob.append("...").append(" (length=").append(length).append(')');
         }
         return bob.toString();
     }
 
-    private String toDateTime(long timestamp) {
+    private static String toDateTime(long timestamp) {
         return java.time.Instant.ofEpochMilli(timestamp).toString();
     }
 }

@@ -1,17 +1,18 @@
 /*
- *  Copyright 2016 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -36,12 +37,12 @@ public class TempIndexTest {
         mConfig = new DatabaseConfig()
             .directPageAccess(false)
             .checkpointRate(-1, null);
-        mDb = newTempDatabase(mConfig);
+        mDb = newTempDatabase(getClass(), mConfig);
     }
 
     @After
     public void teardown() throws Exception {
-        deleteTempDatabases();
+        deleteTempDatabases(getClass());
         mDb = null;
         mConfig = null;
     }
@@ -110,7 +111,7 @@ public class TempIndexTest {
             mDb.checkpoint();
         }
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
 
         assertNull(mDb.indexById(temp.getId()));
 
@@ -151,7 +152,7 @@ public class TempIndexTest {
 
         mDb.deleteIndex(temp).run();
 
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
 
         Index temp2 = mDb.newTemporaryIndex();
 
@@ -168,7 +169,7 @@ public class TempIndexTest {
     @Test
     public void forReplica() throws Exception {
         mConfig.replicate(new NonReplicationManager());
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
 
         try {
             mDb.openIndex("test");
@@ -208,6 +209,84 @@ public class TempIndexTest {
         mDb.checkpoint();
 
         mConfig.replicate(new NonReplicationManager());
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
+    }
+
+    @Test
+    public void txnLock() throws Exception {
+        Index temp = mDb.newTemporaryIndex();
+
+        Transaction txn = mDb.newTransaction();
+        final byte[] key = "k1".getBytes();
+        final byte[] v1 = "v1".getBytes();
+        final byte[] v2 = "v2".getBytes();
+
+        Cursor c = temp.newCursor(txn);
+        c.find(key);
+        c.store(v1);
+
+        Cursor c2 = temp.newCursor(null);
+        try {
+            c2.find(key);
+            fail();
+        } catch (LockTimeoutException e) {
+            // Expected.
+        }
+
+        try {
+            temp.store(null, key, v2);
+            fail();
+        } catch (LockTimeoutException e) {
+            // Expected.
+        }
+
+        fastAssertArrayEquals(v1, temp.load(Transaction.BOGUS, key));
+        txn.exit();
+        assertNull(temp.load(Transaction.BOGUS, key));
+
+        temp.store(txn, key, v1);
+
+        try {
+            temp.store(null, key, v2);
+            fail();
+        } catch (LockTimeoutException e) {
+            // Expected.
+        }
+
+        fastAssertArrayEquals(v1, temp.load(Transaction.BOGUS, key));
+        txn.exit();
+        assertNull(temp.load(Transaction.BOGUS, key));
+    }
+
+    @Test
+    public void cursorValue() throws Exception {
+        // Verifies that cursor value is updated after a successful store.
+
+        Index temp = mDb.newTemporaryIndex();
+
+        final byte[] key = "k1".getBytes();
+        final byte[] v1 = "v1".getBytes();
+
+        {
+            Cursor c = temp.newCursor(null);
+            c.find(key);
+            c.store(v1);
+            assertEquals(v1, c.value());
+            c.store(null);
+            assertNull(c.value());
+            c.reset();
+        }
+
+        {
+            Transaction txn = mDb.newTransaction();
+            Cursor c = temp.newCursor(txn);
+            c.find(key);
+            c.store(v1);
+            assertEquals(v1, c.value());
+            c.store(null);
+            assertNull(c.value());
+            c.reset();
+            txn.reset();
+        }
     }
 }

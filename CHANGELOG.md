@@ -1,9 +1,162 @@
 Changelog
 =========
 
-v1.3.8
+v1.4.1
 ------
+
+* Honor the default durability mode when using a null transaction. Previously, when the default
+  mode is NO_REDO and the transaction is null, a redo log entry would still be created. Also
+  honor the transaction-specified durability mode when using the unsafe locking mode. Previously,
+  the default durability mode would be used.
+* Added support two-phase commit, using the new transaction prepare and getId methods.
+* Added a parallel external mergesort utility.
+
+v1.4.0.2 (2018-01-21)
+--------
+* Fix bug when deleting entries from the largest allowed page size, 65536 bytes. Under the right
+  conditions, the internal search vector pointer would overflow the 16-bit range.
+
+v1.4.0.1 (2018-01-01)
+--------
+* Added a RAFT-based replication system.
+* Added a ValueAccessor interface which supports very large values (>2Gib), random access,
+  appending, truncation, zero-filling, and streams.
+* Added Scanners and Updaters, which can be simpler and more efficient than using a Cursor.
+* Added a key-only view, intended for use with scanners and updaters.
+* Added various set views: union, intersection, and difference.
+* Added support for event filtering and logging, with more events defined.
+* Added comparator access to views and cursors.
+* Added cursor registration, which can speed up replica performance when modifying value ranges.
+* Added cursor findNearby methods for relational operators (GE, GT, LE, LT).
+* Added a cursor close method, so that it can be used with try-with-resources statements.
+* Added a view method to check for the existence of a value without loading it.
+* Added a view method to conditionally update a value, based on equality.
+* Added a view method to touch a key, as a convenient way to lock it.
+* Added a transaction flush method, which helps ensure that replicated changes propagate early.
+* Added a transaction lock combining method, as an alternative to nested scopes.
+* Added a dirty pages stat counter, and include internal index stats.
+* Added support for direct I/O (O_DIRECT).
+* Added a CRC-32C utility (to bridge the gap with Java 9)
+* Added more control over file preallocation when extending the length.
+* Files are opened with the random access hint by default, eliminating unnecessary prefetching.
+* Improved concurrency with the introduction of a "clutch", replacing ordinary latches.
+* Incomplete database restoration is now detected, causing an IncompleteRestoreException to be
+  thrown when opening the database.
+* Unpositioned cursors now throw a specialized exception, still extending IllegalStateException.
+* The index exchange/insert/replace/update operations are now always atomic, even when using
+  the BOGUS transaction.
+
+v1.3.12.3 (2017-05-20)
+---------
+* Fix race condition when capturing pages during a snapshot.
+* Fix transaction id reset to zero when opening db.
+* Fix race condition when creating an index with replication.
+* Fix a rare deadlock when merging a tree node into a sibling node.
+* Fix double delete of header page when closing database concurrently with a checkpoint.
+* Eliminate potentially thread-unsafe code and improve handling of leader failover.
+* Ensure that replication consumer thread exits when switching to replica mode.
+* Prevent double database close.
+* Rollback after failed file preallocation.
+* Fix GC race condition in test.
+
+v1.3.12.2 (2017-04-15)
+---------
+* Fix illegal latch release during recovery.
+* Fix deadlock during replication subsystem checkpoint.
+* Fix race condition when dropping an index
+* Fix race conditions when accessing indexes while database is being closed.
+* Refined behavior when storing nulls into default and constrained views.
+
+v1.3.12.1 (2017-04-01)
+---------
+* Fix stack overflow error when skipping by zero on a transformed view.
+* Copied cursor should have NOT_LOADED value assigned when applicable.
+* Support redo tracing when replication manager is installed.
+* Storing unsupported keys into transformed views shouldn't fail in all cases.
+* Safely permit quick lock availability checks.
+
+v1.3.12 (2017-03-18)
+-------
+* Fix recovery handling of fragmented and deleted entries.
+* Ensure that broken transactions always attempt to write rollback operations into the redo log.
+* Disable emptying of trash following failover. It races with concurrent transaction undo
+  operations.
+* Undo log fixes for fully mapped mode, for large transactions, for many open transactions, for
+  large keys, and for large values.
+* Fix various race conditions which can corrupt the node map data structure.
+* Fix inline fragmented value calculation to consider that a remainder of zero means that no
+  inline length field is required.
+* Limit maximum key size based on the maximum entry size. With a page size of 4096, the maximum
+  was 2026 bytes, but now it's 2024. Larger keys are fragment encoded as before.
+* Fix redo writer latch state when switching redo writers.
+* Index rename and delete operations should always commit against the same redo writer that the
+  transaction uses.
+* Fix stuck checkpoints following leader failover.
+* Fix handling of commit operations which force the buffer to be flushed early.
+* Fix handling of delete commit operation.
+* Fix shared lock reentrancy bug when another thread is waiting in the queue.
+* Fix ghost deletion race condition.
+* Always rollback recovered transactions which shouldn't be replicated, unless they were
+  explicitly committed.
+* More latch performance tweaks.
+* Improved performance of writing into the redo log when under heavy contention.
+* Improved performance when accessing mapped files.
+* Add open options for readahead and close hinting to increase page cache efficiency.
+* Reduce contention on application threads when snapshots are in progress.
+* Promptly unblock threads waiting on locks when database is closed.
+* New threading model for ReplRedoEngine to support concurrent replication processing.
+
+v1.3.11 (2017-01-28)
+-------
+* New latch implementation which offers higher performance on multi-core hardware and also uses
+  less memory.
+* Redo log decoding changes, to prevent compatibility issues with future versions.
+* Writes to the redo log are now performed after applying any index changes. This allows the redo
+  log to block without holding node latch, improving concurrency.
+* Replication manager interface changes.
+* Java 9 compatibility fixes.
+
+v1.3.10.3 (2016-12-26)
+---------
+* Fix striped transaction id stride value.
+* Fix variable length decoding of large 64-bit signed values.
+* Don't attempt deleting root node of deleted tree after database has been closed.
+* Use thread-local object when waiting for a lock, reducing garbage accumulation.
+
+v1.3.10.2 (2016-12-10)
+---------
+* Fix deadlock when dropping an index.
+* Fix maximum size calculation when fragmenting a value to fit into a split node. Entries with
+  large keys would sometimes be rejected.
+
+v1.3.10.1 (2016-12-05)
+---------
+* Fix regression bug created by earlier fix which allowed a split node to become empty.
+
+v1.3.10 (2016-12-03)
+-------
+* Fix bug which allowed a split node to become empty.
+* Optimized transactional deletes.
+
+v1.3.9 (2016-11-27)
+------
+* Avoid looping indefinitely if random search encounters ghosts.
+* Fix split insert handling of large keys and values which caused an overflow.
+* Fix edge cases when storing large values into split nodes, and the values must be fragmented.
+* Add method to reset a transaction due to an exception.
+* Added a convenience method to create transactions from view instances.
+* Cursor exceptions suppressed when database is closed.
+* Optimize handling of shared commit lock reentrancy by eliminating a contended write.
+* Optimize generation of random numbers, used internally.
+* Update node MRU position less aggressively, improving performance due to fewer memory writes.
+
+v1.3.8 (2016-10-29)
+------
+* Fix memory leaks when processing replicated transactions.
+* Use a larger redo log buffer, to better cope with stalls when writing to the file.
 * Stripe transaction state to improve concurrency.
+* Don't run shutdown hooks when panicking, to avoid deadlocks.
+* More replicated rollback improvements.
 
 v1.3.7.1 (2016-10-22)
 --------

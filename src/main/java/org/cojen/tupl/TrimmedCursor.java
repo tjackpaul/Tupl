@@ -1,22 +1,27 @@
 /*
- *  Copyright 2013-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
 
+import java.io.InputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+
+import java.util.Comparator;
 
 /**
  * 
@@ -37,8 +42,58 @@ final class TrimmedCursor implements Cursor {
     }
 
     @Override
+    public long valueLength() throws IOException {
+        return mSource.valueLength();
+    }
+
+    @Override
+    public void valueLength(long length) throws IOException {
+        mSource.valueLength(length);
+    }
+
+    @Override
+    public int valueRead(long pos, byte[] buf, int off, int len) throws IOException {
+        return mSource.valueRead(pos, buf, off, len);
+    }
+
+    @Override
+    public void valueWrite(long pos, byte[] buf, int off, int len) throws IOException {
+        mSource.valueWrite(pos, buf, off, len);
+    }
+
+    @Override
+    public void valueClear(long pos, long length) throws IOException {
+        mSource.valueClear(pos, length);
+    }
+
+    @Override
+    public InputStream newValueInputStream(long pos) throws IOException {
+        return mSource.newValueInputStream(pos);
+    }
+
+    @Override
+    public InputStream newValueInputStream(long pos, int bufferSize) throws IOException {
+        return mSource.newValueInputStream(pos, bufferSize);
+    }
+
+    @Override
+    public OutputStream newValueOutputStream(long pos) throws IOException {
+        return mSource.newValueOutputStream(pos);
+    }
+
+    @Override
+    public OutputStream newValueOutputStream(long pos, int bufferSize) throws IOException {
+        return mSource.newValueOutputStream(pos, bufferSize);
+    }
+
+    @Override
     public Ordering getOrdering() {
         return mSource.getOrdering();
+    }
+    
+    @Override
+    public Comparator<byte[]> getComparator() {
+        return mSource.getComparator();
     }
 
     @Override
@@ -90,6 +145,16 @@ final class TrimmedCursor implements Cursor {
     @Override
     public int compareKeyTo(byte[] rkey, int offset, int length) {
         return mSource.compareKeyTo(mView.applyPrefix(rkey, offset, length));
+    }
+
+    @Override
+    public boolean register() throws IOException {
+        return mSource.register();
+    }
+
+    @Override
+    public void unregister() {
+        mSource.unregister();
     }
 
     @Override
@@ -189,6 +254,30 @@ final class TrimmedCursor implements Cursor {
     }
 
     @Override
+    public LockResult findNearbyGe(byte[] key) throws IOException {
+        mKey = null;
+        return mSource.findNearbyGe(mView.applyPrefix(key));
+    }
+
+    @Override
+    public LockResult findNearbyGt(byte[] key) throws IOException {
+        mKey = null;
+        return mSource.findNearbyGt(mView.applyPrefix(key));
+    }
+
+    @Override
+    public LockResult findNearbyLe(byte[] key) throws IOException {
+        mKey = null;
+        return mSource.findNearbyLe(mView.applyPrefix(key));
+    }
+
+    @Override
+    public LockResult findNearbyLt(byte[] key) throws IOException {
+        mKey = null;
+        return mSource.findNearbyLt(mView.applyPrefix(key));
+    }
+
+    @Override
     public LockResult random(byte[] lowKey, byte[] highKey) throws IOException {
         mKey = null;
         if (lowKey != null) {
@@ -220,13 +309,6 @@ final class TrimmedCursor implements Cursor {
         mSource.commit(value);
     }
 
-    /*
-    @Override
-    public Stream newStream() {
-        return new TrimmedStream(mView, mSource.newStream());
-    }
-    */
-
     @Override
     public Cursor copy() {
         TrimmedCursor c = new TrimmedCursor(mView, mSource.copy());
@@ -238,5 +320,10 @@ final class TrimmedCursor implements Cursor {
     public void reset() {
         mKey = null;
         mSource.reset();
+    }
+
+    @Override
+    public void close() {
+        reset();
     }
 }

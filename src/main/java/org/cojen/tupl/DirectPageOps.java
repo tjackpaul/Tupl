@@ -1,22 +1,21 @@
 /*
- *  Copyright 2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
-
-import sun.misc.Unsafe;
 
 import java.io.IOException;
 
@@ -28,6 +27,10 @@ import java.util.zip.CRC32;
 
 import org.cojen.tupl.io.DirectAccess;
 import org.cojen.tupl.io.MappedPageArray;
+import org.cojen.tupl.io.UnsafeAccess;
+
+import com.sun.jna.Native;
+import com.sun.jna.Platform;
 
 /**
  * 
@@ -35,13 +38,14 @@ import org.cojen.tupl.io.MappedPageArray;
  * @author Brian S O'Neill
  * @see PageOps
  */
+@SuppressWarnings("restriction")
 final class DirectPageOps {
     static final int NODE_OVERHEAD = 100 - 24; // 6 fewer fields
 
     private static final boolean CHECK_BOUNDS;
     private static final int CHECKED_PAGE_SIZE;
 
-    private static final Unsafe UNSAFE = Hasher.getUnsafe();
+    private static final sun.misc.Unsafe UNSAFE = UnsafeAccess.obtain();
     private static final long BYTE_ARRAY_OFFSET = UNSAFE.arrayBaseOffset(byte[].class);
     private static final long EMPTY_TREE_LEAF;
     private static final long CLOSED_TREE_PAGE;
@@ -70,7 +74,7 @@ final class DirectPageOps {
     }
 
     private static long newEmptyTreePage(int pageSize, int type) {
-        long empty = p_calloc(pageSize);
+        long empty = p_calloc(pageSize, false);
 
         p_bytePut(empty, 0, type);
 
@@ -101,12 +105,21 @@ final class DirectPageOps {
         return STUB_TREE_PAGE;
     }
 
-    static long p_alloc(int size) {
-        return UNSAFE.allocateMemory(size);
+    static class JNA {
+        static {
+            Native.register(Platform.C_LIBRARY_NAME);
+        }
+
+        // TODO: Define variant that works on Windows.
+        static native long valloc(int size);
     }
 
-    static long p_calloc(int size) {
-        long ptr = p_alloc(size);
+    static long p_alloc(int size, boolean aligned) {
+        return aligned ? JNA.valloc(size) : UNSAFE.allocateMemory(size);
+    }
+
+    static long p_calloc(int size, boolean aligned) {
+        long ptr = p_alloc(size, aligned);
         UNSAFE.setMemory(ptr, size, (byte) 0);
         return ptr;
     }
@@ -255,9 +268,9 @@ final class DirectPageOps {
         }
     }
 
-    static long p_calloc(Object arena, int size) {
+    static long p_calloc(Object arena, int size, boolean aligned) {
         if (arena instanceof Arena) {
-            final long page = ((Arena) arena).p_calloc(size);
+            final long page = ((Arena) arena).p_calloc(size); // assumed to be aligned
             if (page != p_null()) {
                 return page;
             }
@@ -265,18 +278,18 @@ final class DirectPageOps {
             throw new IllegalArgumentException();
         }
 
-        return p_calloc(size);
+        return p_calloc(size, aligned);
     }
 
-    static long p_clone(final long page, int length) {
-        long dst = p_alloc(length);
+    static long p_clone(final long page, int length, boolean aligned) {
+        long dst = p_alloc(length, aligned);
         UNSAFE.copyMemory(page, dst, length);
         return dst;
     }
 
-    static long p_transfer(byte[] array) {
+    static long p_transfer(byte[] array, boolean aligned) {
         int length = array.length;
-        final long page = p_alloc(length);
+        final long page = p_alloc(length, aligned);
         p_copyFromArray(array, 0, page, 0, length);
         return page;
     }

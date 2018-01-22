@@ -1,17 +1,18 @@
 /*
- *  Copyright 2012-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl.io;
@@ -77,19 +78,9 @@ public abstract class FileIO implements CauseCloseable {
         return new JavaFileIO(file, options, openFileCount);
     }
 
-    public abstract boolean isReadOnly();
+    public abstract boolean isDirectIO();
 
-    /**
-     * Preallocates blocks to the file. This call ensures that disk space is allocated 
-     * for this file for the bytes in the range starting at offset and continuing for 
-     * length bytes.  Subsequent writes to the specified range are guaranteed not to 
-     * fail because of lack of disk space.
-     *
-     * @param pos zero-based position in file.
-     * @param length amount of bytes to preallocate starting at pos.
-     * @throws IllegalArgumentException
-     */
-    abstract void preallocate(long pos, long length) throws IOException;
+    public abstract boolean isReadOnly();
 
     public abstract long length() throws IOException;
 
@@ -97,7 +88,15 @@ public abstract class FileIO implements CauseCloseable {
      * Attempt to set the length of the file. It isn't critical that the
      * operation succeed, and so any exceptions can be suppressed.
      */
-    public abstract void setLength(long length) throws IOException;
+    public void setLength(long length) throws IOException {
+        setLength(length, LengthOption.PREALLOCATE_NEVER);
+    }
+
+    /**
+     * Attempt to set the length of the file. It isn't critical that the
+     * operation succeed, and so any exceptions can be suppressed.
+     */
+    public abstract void setLength(long length, LengthOption option) throws IOException;
 
     /**
      * @param pos zero-based position in file
@@ -162,6 +161,11 @@ public abstract class FileIO implements CauseCloseable {
      * @param metadata pass true to flush all file metadata
      */
     public abstract void sync(boolean metadata) throws IOException;
+
+    @Override
+    public void close() throws IOException {
+        close(null);
+    }
 
     /**
      * Durably flushes the given directory, if required. If the given file is not a directory,

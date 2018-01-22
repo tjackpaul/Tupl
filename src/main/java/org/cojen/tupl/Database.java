@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -22,7 +23,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.Serializable;
 
-import java.lang.reflect.Method;
+import java.util.concurrent.Executor;
+
+import java.nio.charset.StandardCharsets;
 
 import org.cojen.tupl.io.CauseCloseable;
 
@@ -74,15 +77,7 @@ public interface Database extends CauseCloseable, Flushable {
      * Open a database, creating it if necessary.
      */
     public static Database open(DatabaseConfig config) throws IOException {
-        Method m = config.directOpenMethod();
-        if (m != null) {
-            try {
-                return (Database) m.invoke(null, config);
-            } catch (Exception e) {
-                config.handleDirectException(e);
-            }
-        }
-        return LocalDatabase.open(config);
+        return config.open(false, null);
     }
 
     /**
@@ -91,15 +86,7 @@ public interface Database extends CauseCloseable, Flushable {
      * must be used to format it.
      */
     public static Database destroy(DatabaseConfig config) throws IOException {
-        Method m = config.directDestroyMethod();
-        if (m != null) {
-            try {
-                return (Database) m.invoke(null, config);
-            } catch (Exception e) {
-                config.handleDirectException(e);
-            }
-        }
-        return LocalDatabase.destroy(config);
+        return config.open(true, null);
     }
 
     /**
@@ -116,7 +103,7 @@ public interface Database extends CauseCloseable, Flushable {
      * @return shared Index instance; null if not found
      */
     public default Index findIndex(String name) throws IOException {
-        return findIndex(name.getBytes("UTF-8"));
+        return findIndex(name.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -133,7 +120,7 @@ public interface Database extends CauseCloseable, Flushable {
      * @return shared Index instance
      */
     public default Index openIndex(String name) throws IOException {
-        return openIndex(name.getBytes("UTF-8"));
+        return openIndex(name.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -177,7 +164,7 @@ public interface Database extends CauseCloseable, Flushable {
      * @throws IllegalArgumentException if index belongs to another database instance
      */
     public default void renameIndex(Index index, String newName) throws IOException {
-        renameIndex(index, newName.getBytes("UTF-8"));
+        renameIndex(index, newName.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -235,6 +222,14 @@ public interface Database extends CauseCloseable, Flushable {
      * {@link DatabaseConfig#durabilityMode default} is used.
      */
     public abstract Transaction newTransaction(DurabilityMode durabilityMode);
+
+    /**
+     * Returns a new Sorter instance, which uses the given executor for running parallel
+     * tasks. Pass null to use a default executor. The standard algorithm is a parallel
+     * external mergesort, which attempts to use all available processors. All external storage
+     * is maintained in the database itself, in the form of temporary indexes.
+     */
+    public abstract Sorter newSorter(Executor executor) throws IOException;
 
     /**
      * Preallocates pages for immediate use. The actual amount allocated
@@ -313,15 +308,7 @@ public interface Database extends CauseCloseable, Flushable {
     public static Database restoreFromSnapshot(DatabaseConfig config, InputStream in)
         throws IOException
     {
-        Method m = config.directRestoreMethod();
-        if (m != null) {
-            try {
-                return (Database) m.invoke(null, config, in);
-            } catch (Exception e) {
-                config.handleDirectException(e);
-            }
-        }
-        return LocalDatabase.restoreFromSnapshot(config, in);
+        return config.open(false, in);
     }
 
     /**
@@ -356,6 +343,7 @@ public interface Database extends CauseCloseable, Flushable {
         public long freePages;
         public long totalPages;
         public long cachedPages;
+        public long dirtyPages;
         public int openIndexes;
         public long lockCount;
         public long cursorCount;
@@ -388,6 +376,13 @@ public interface Database extends CauseCloseable, Flushable {
          */
         public long cachedPages() {
             return cachedPages;
+        }
+
+        /**
+         * Returns the count of pages which are dirty (need to be written with a checkpoint).
+         */
+        public long dirtyPages() {
+            return dirtyPages;
         }
 
         /**
@@ -461,6 +456,8 @@ public interface Database extends CauseCloseable, Flushable {
                 return pageSize == other.pageSize
                     && freePages == other.freePages
                     && totalPages == other.totalPages
+                    && cachedPages == other.cachedPages
+                    && dirtyPages == other.dirtyPages
                     && openIndexes == other.openIndexes
                     && lockCount == other.lockCount
                     && cursorCount == other.cursorCount
@@ -476,6 +473,7 @@ public interface Database extends CauseCloseable, Flushable {
                 + ", freePages=" + freePages
                 + ", totalPages=" + totalPages
                 + ", cachedPages=" + cachedPages
+                + ", dirtyPages=" + dirtyPages
                 + ", openIndexes=" + openIndexes
                 + ", lockCount=" + lockCount
                 + ", cursorCount=" + cursorCount
@@ -486,18 +484,26 @@ public interface Database extends CauseCloseable, Flushable {
     }
 
     /**
-     * Flushes, but does not sync, all non-flushed transactions. Transactions
-     * committed with {@link DurabilityMode#NO_FLUSH no-flush} effectively
-     * become {@link DurabilityMode#NO_SYNC no-sync} durable.
+     * Flushes all committed transactions, but not durably. Transactions committed with {@link
+     * DurabilityMode#NO_FLUSH no-flush} effectively become {@link DurabilityMode#NO_SYNC
+     * no-sync} durable.
+     *
+     * <p>When the database is replicated, the no-flush mode is identical to the no-sync mode.
+     * Calling this method on a replicated database has no effect.
      */
     @Override
     public abstract void flush() throws IOException;
 
     /**
-     * Persists all non-flushed and non-sync'd transactions. Transactions
-     * committed with {@link DurabilityMode#NO_FLUSH no-flush} and {@link
-     * DurabilityMode#NO_SYNC no-sync} effectively become {@link
-     * DurabilityMode#SYNC sync} durable.
+     * Durably flushes all committed transactions. Transactions committed with {@link
+     * DurabilityMode#NO_FLUSH no-flush} and {@link DurabilityMode#NO_SYNC no-sync} effectively
+     * become {@link DurabilityMode#SYNC sync} durable.
+     *
+     * <p>When the database is replicated, no-flush and no-sync transactions commit
+     * asynchronously, and this method doesn't wait for them to be fully committed. The
+     * transaction must use the {@link DurabilityMode#SYNC sync} mode when commit assurance is
+     * required, and then this method can be called afterwards to acheive a stronger durability
+     * guarantee.
      */
     public abstract void sync() throws IOException;
 

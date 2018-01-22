@@ -1,23 +1,21 @@
 /*
- *  Copyright 2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl.io;
-
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
@@ -27,44 +25,41 @@ import java.nio.ByteBuffer;
  *
  * @author Brian S O'Neill
  */
+@SuppressWarnings("restriction")
 public class DirectAccess {
-    private static final Field cDirectAddress;
-    private static final Field cDirectCapacity;
-    private static final Constructor<?> cDirectCtor;
+    private static final sun.misc.Unsafe UNSAFE = UnsafeAccess.tryObtain();
+
+    private static final Class<?> cDirectByteBufferClass;
+    static final long cDirectAddressOffset;
+    private static final long cDirectCapacityOffset;
     private static final ThreadLocal<ByteBuffer> cLocalBuffer;
     private static final ThreadLocal<ByteBuffer> cLocalBuffer2;
 
     static {
-        Field addrField;
-        Field capField;
-        Constructor<?> ctor;
+        Class<?> clazz;
+        long addrOffset, capOffset;
         ThreadLocal<ByteBuffer> local;
         ThreadLocal<ByteBuffer> local2;
 
         try {
-            addrField = Buffer.class.getDeclaredField("address");
-            addrField.setAccessible(true);
+            clazz = Class.forName("java.nio.DirectByteBuffer");
 
-            capField = Buffer.class.getDeclaredField("capacity");
-            capField.setAccessible(true);
-
-            Class<?> clazz = Class.forName("java.nio.DirectByteBuffer");
-            ctor = clazz.getDeclaredConstructor(long.class, int.class);
-            ctor.setAccessible(true);
+            addrOffset = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("address"));
+            capOffset = UNSAFE.objectFieldOffset(Buffer.class.getDeclaredField("capacity"));
 
             local = new ThreadLocal<>();
             local2 = new ThreadLocal<>();
         } catch (Exception e) {
-            addrField = null;
-            capField = null;
-            ctor = null;
+            clazz = null;
+            addrOffset = 0;
+            capOffset = 0;
             local = null;
             local2 = null;
         }
 
-        cDirectAddress = addrField;
-        cDirectCapacity = capField;
-        cDirectCtor = ctor;
+        cDirectByteBufferClass = clazz;
+        cDirectAddressOffset = addrOffset;
+        cDirectCapacityOffset = capOffset;
         cLocalBuffer = local;
         cLocalBuffer2 = local2;
     }
@@ -93,7 +88,7 @@ public class DirectAccess {
     }
 
     public static boolean isSupported() {
-        return cDirectCtor != null;
+        return cLocalBuffer2 != null;
     }
 
     /**
@@ -120,7 +115,7 @@ public class DirectAccess {
             throw new IllegalArgumentException("Not a direct buffer");
         }
         try {
-            return cDirectAddress.getLong(buf);
+            return UNSAFE.getLong(buf, cDirectAddressOffset);
         } catch (Exception e) {
             throw new UnsupportedOperationException(e);
         }
@@ -135,12 +130,12 @@ public class DirectAccess {
 
         try {
             if (bb == null) {
-                bb = (ByteBuffer) cDirectCtor.newInstance(ptr, length);
+                bb = (ByteBuffer) UNSAFE.allocateInstance(cDirectByteBufferClass);
+                bb.clear();
                 local.set(bb);
-            } else {
-                cDirectAddress.setLong(bb, ptr);
-                cDirectCapacity.setInt(bb, length);
             }
+            UNSAFE.putLong(bb, cDirectAddressOffset, ptr);
+            UNSAFE.putInt(bb, cDirectCapacityOffset, length);
         } catch (Exception e) {
             throw new UnsupportedOperationException(e);
         }
@@ -157,8 +152,8 @@ public class DirectAccess {
     public static void unref(ByteBuffer bb) {
         bb.position(0).limit(0);
         try {
-            cDirectCapacity.setInt(bb, 0);
-            cDirectAddress.setLong(bb, 0);
+            UNSAFE.putInt(bb, cDirectCapacityOffset, 0);
+            UNSAFE.putLong(bb, cDirectAddressOffset, 0);
         } catch (Exception e) {
             throw new UnsupportedOperationException(e);
         }

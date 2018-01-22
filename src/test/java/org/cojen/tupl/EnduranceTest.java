@@ -1,17 +1,18 @@
 /*
- *  Copyright 2015-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 package org.cojen.tupl;
 
@@ -46,7 +47,7 @@ public class EnduranceTest {
 
     @After
     public void teardown() throws Exception {
-        deleteTempDatabases();
+        deleteTempDatabases(getClass());
         mDb = null;
     }
 
@@ -69,7 +70,7 @@ public class EnduranceTest {
 
         decorate(config);
 
-        mDb = newTempDatabase(config);
+        mDb = newTempDatabase(getClass(), config);
         mIx = mDb.openIndex("test");
 
         // Only use row ids up to this value, then wrap around
@@ -158,7 +159,7 @@ public class EnduranceTest {
 
         decorate(config);
 
-        mDb = newTempDatabase(config);
+        mDb = newTempDatabase(getClass(), config);
         mIx = mDb.openIndex("test");
 
         int numWorkers = 5;
@@ -188,7 +189,9 @@ public class EnduranceTest {
                     try {
                         mIx.store(null, keyBuffer.array(), rowValue);
                     } catch (IOException e) {
-                        assertNull(e);
+                        if (keepRunning.get()) {
+                            assertNull(e);
+                        }
                     }
 
                     // If the test only did inserts and stores, eventually all row ids would
@@ -201,7 +204,9 @@ public class EnduranceTest {
                     try {
                         mIx.delete(null, keyBuffer.array());
                     } catch (IOException e) {
-                        assertNull(e);
+                        if (keepRunning.get()) {
+                            assertNull(e);
+                        }
                     }
                 }
             };
@@ -225,7 +230,7 @@ public class EnduranceTest {
 
         decorate(config);
 
-        mDb = newTempDatabase(config);
+        mDb = newTempDatabase(getClass(), config);
 
         for (int trial = 1; trial <= 5; trial++) {
             final Index ix = mDb.openIndex("write_evict");
@@ -268,6 +273,18 @@ public class EnduranceTest {
 
             // Write some more data while evicting.
             Future<?> writeJob = ForkJoinPool.commonPool().submit(writeSome);
+            /* FIXME
+[ERROR] writeAndEvict(org.cojen.tupl.EnduranceDirectTest)  Time elapsed: 68.951 s  <<< ERROR!
+org.cojen.tupl.LockTimeoutException: Waited 1 second
+        at org.cojen.tupl._Locker.failed(_Locker.java:494)
+        at org.cojen.tupl._LockManager.lockSharedLocal(_LockManager.java:196)
+        at org.cojen.tupl._Tree.lockSharedLocal(_Tree.java:1277)
+        at org.cojen.tupl._TreeCursor.doLoad(_TreeCursor.java:2451)
+        at org.cojen.tupl._TreeCursor.randomNode(_TreeCursor.java:2332)
+        at org.cojen.tupl._Tree.evict(_Tree.java:649)
+        at org.cojen.tupl.EnduranceTest.lambda$writeAndEvict$3(EnduranceTest.java:257)
+        at org.cojen.tupl.EnduranceTest.writeAndEvict(EnduranceTest.java:276)
+        */
             evictSome.call();
 
             try {
@@ -354,6 +371,68 @@ public class EnduranceTest {
     }
 
     @Test
+    public void ghosts() throws Exception {
+        // Runs concurrent transactional inserts and deletes, making sure that the ghost
+        // deletion code handles splits correctly.
+
+        DatabaseConfig config = new DatabaseConfig()
+            .directPageAccess(false)
+            .durabilityMode(DurabilityMode.NO_FLUSH);
+
+        decorate(config);
+
+        mDb = newTempDatabase(getClass(), config);
+        mIx = mDb.openIndex("test");
+
+        AtomicBoolean stop = new AtomicBoolean();
+
+        class Task extends Thread {
+            @Override
+            public void run() {
+                Random rnd = new Random();
+                try {
+                    byte[][] keys = new byte[1000][];
+
+                    while (!stop.get()) {
+                        for (int i=0; i<keys.length; i++) {
+                            keys[i] = randomStr(rnd, 10);
+                            mIx.store(null, keys[i], randomStr(rnd, 10, 100));
+                        }
+
+                        Transaction txn = mDb.newTransaction();
+                        try {
+                            for (int i=0; i<keys.length; i++) {
+                                mIx.store(txn, keys[i], null);
+                            }
+                            txn.commit();
+                        } finally {
+                            txn.reset();
+                        }
+                    }
+                } catch (Exception e) {
+                    e.printStackTrace(System.out);
+                    System.exit(1);
+                }
+            }
+        }
+
+        Task[] tasks = new Task[2];
+        for (int i=0; i<tasks.length; i++) {
+            (tasks[i] = new Task()).start();
+        }
+
+        Thread.sleep(10_000);
+
+        stop.set(true);
+
+        for (Task t : tasks) {
+            t.join();
+        }
+
+        assertEquals(0, mIx.count(null, null));
+    }
+
+    @Test
     public void testBasic() throws Exception {
         DatabaseConfig config = new DatabaseConfig()
             .pageSize(2048)
@@ -364,7 +443,7 @@ public class EnduranceTest {
 
         decorate(config);
 
-        mDb = newTempDatabase(config);
+        mDb = newTempDatabase(getClass(), config);
         mIx = mDb.openIndex("test");
 
         int numWorkers = 5;
@@ -514,48 +593,40 @@ public class EnduranceTest {
     }
 
     class StoreOpWorker extends AbstractWorker {
-        Random mRandom;
         StoreOpWorker(Database db, Index ix) {
             super(db, ix, 5);
-            mRandom = ThreadLocalRandom.current();
         }
 
         void executeOperation() throws IOException {
             Transaction txn = newTransaction();
-            byte[] key = randomStr(mRandom, 10, 100);
-            byte[] val = randomStr(mRandom, 100, 500);
+            byte[] key = randomStr(ThreadLocalRandom.current(), 10, 100);
+            byte[] val = randomStr(ThreadLocalRandom.current(), 100, 500);
             getIndex().store(txn, key, val);
             txn.commit();
         }
     }
 
     class DeleteOpWorker extends AbstractWorker {
-        Random mRandom;
-
         DeleteOpWorker(Database db, Index ix) {
             super(db, ix, 10);
-            mRandom = ThreadLocalRandom.current();
         }
 
         void executeOperation() throws IOException {
             Transaction txn = newTransaction();
-            byte[] key = randomStr(mRandom, 10, 100);
+            byte[] key = randomStr(ThreadLocalRandom.current(), 10, 100);
             getIndex().delete(txn, key);
             txn.commit();
         }
     }
 
     class ReadOpWorker extends AbstractWorker {
-        Random mRandom;
-
         ReadOpWorker(Database db, Index ix) {
             super(db, ix, 1);
-            mRandom = ThreadLocalRandom.current();
         }
 
         void executeOperation() throws IOException {
             Transaction txn = newTransaction();
-            byte[] key = randomStr(mRandom, 10, 100);
+            byte[] key = randomStr(ThreadLocalRandom.current(), 10, 100);
             getIndex().load(txn, key);
             txn.commit();
         }

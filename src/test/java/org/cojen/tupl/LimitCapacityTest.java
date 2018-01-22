@@ -1,17 +1,18 @@
 /*
- *  Copyright 2015 Brian S O'Neill
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -35,12 +36,12 @@ public class LimitCapacityTest {
     public void createTempDb() throws Exception {
         mConfig = new DatabaseConfig().checkpointSizeThreshold(0);
         mConfig.directPageAccess(false);
-        mDb = newTempDatabase(mConfig);
+        mDb = newTempDatabase(getClass(), mConfig);
     }
 
     @After
     public void teardown() throws Exception {
-        deleteTempDatabases();
+        deleteTempDatabases(getClass());
         mDb = null;
     }
 
@@ -57,6 +58,8 @@ public class LimitCapacityTest {
 
         Cursor fill = ix.newCursor(Transaction.BOGUS);
 
+        mDb.suspendCheckpoints();
+
         for (int i=0; i<50_000_000; i++) {
             Utils.encodeInt48BE(key, 0, i);
             fill.findNearby(key);
@@ -68,6 +71,9 @@ public class LimitCapacityTest {
                 continue;
             }
         }
+
+        mDb.resumeCheckpoints();
+        mDb.checkpoint();
 
         mDb.compactFile(null, 0.95);
 
@@ -118,6 +124,7 @@ public class LimitCapacityTest {
     }
 
     private void fragmentMess(int size, int minFreed) throws Exception {
+        mDb.suspendCheckpoints();
         mDb.capacityLimit(size);
         Index ix = mDb.openIndex("test");
 
@@ -149,32 +156,6 @@ public class LimitCapacityTest {
     }
 
     @Test
-    public void fragmentRecovery() throws Exception {
-        // Tests that large value is in the redo log, even though it's not in the database.
-        // The opposite behavior is worse -- in the database but not in the redo log. This can
-        // happen if writing to the redo log fails. This is why redo is written first.
-
-        mDb.capacityLimit(1_000_000L);
-        Index ix = mDb.openIndex("test");
-
-        byte[] value = randomStr(new java.util.Random(), 1_000_000);
-
-        try {
-            ix.store(null, "key".getBytes(), value);
-            fail();
-        } catch (DatabaseFullException e) {
-            // Expected.
-        }
-
-        // Reopen without capacity limit.
-        mDb = reopenTempDatabase(mDb, mConfig);
-        ix = mDb.openIndex("test");
-
-        // Value was re-inserted.
-        fastAssertArrayEquals(value, ix.load(null, "key".getBytes()));
-    }
-
-    @Test
     public void fragmentRollback() throws Exception {
         // Tests that large value is fully rolled back when an explicit transaction is used.
 
@@ -194,7 +175,31 @@ public class LimitCapacityTest {
         }
 
         // Reopen without capacity limit.
-        mDb = reopenTempDatabase(mDb, mConfig);
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
+        ix = mDb.openIndex("test");
+
+        // Value is still gone.
+        assertEquals(null, ix.load(null, "key".getBytes()));
+    }
+
+    @Test
+    public void fragmentRollbackAutoCommit() throws Exception {
+        // Tests that large value is fully rolled back for auto-commit transaction.
+
+        mDb.capacityLimit(1_000_000L);
+        Index ix = mDb.openIndex("test");
+
+        byte[] value = randomStr(new java.util.Random(), 1_000_000);
+
+        try {
+            ix.store(null, "key".getBytes(), value);
+            fail();
+        } catch (DatabaseFullException e) {
+            // Expected.
+        }
+
+        // Reopen without capacity limit.
+        mDb = reopenTempDatabase(getClass(), mDb, mConfig);
         ix = mDb.openIndex("test");
 
         // Value is still gone.

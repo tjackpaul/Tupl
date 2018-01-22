@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -41,13 +42,15 @@ abstract class _PageDb implements CauseCloseable {
 
     public abstract boolean isDurable();
 
+    public abstract boolean isDirectIO();
+
     /**
-     * @return 0 or _NodeUsageList.MODE_NO_EVICT
+     * @return 0 or _NodeContext.MODE_NO_EVICT
      */
     public abstract int allocMode();
 
     /**
-     * @param mode _NodeUsageList.MODE_UNEVICTABLE | MODE_NO_EVICT
+     * @param mode _NodeContext.MODE_UNEVICTABLE | MODE_NO_EVICT
      * @return node with id assigned
      */
     public abstract _Node allocLatchedNode(_LocalDatabase db, int mode) throws IOException;
@@ -75,7 +78,7 @@ abstract class _PageDb implements CauseCloseable {
         public long freePages;
 
         public String toString() {
-            return "_PageDb.Stats {totalPages=" + totalPages + ", freePages=" + freePages + '}';
+            return "PageDb.Stats {totalPages=" + totalPages + ", freePages=" + freePages + '}';
         }
     }
 
@@ -135,11 +138,14 @@ abstract class _PageDb implements CauseCloseable {
      * Deletes a page, but doesn't commit it. Deleted pages are not used for
      * new writes, and they are still readable until after a commit. Caller
      * must ensure that a page is deleted at most once between commits.
+     *
+     * @param force when true, never throw an IOException; OutOfMemoryError is still possible
      */
-    public abstract void deletePage(long id) throws IOException;
+    public abstract void deletePage(long id, boolean force) throws IOException;
 
     /**
-     * Recycles a page for immediate re-use.
+     * Recycles a page for immediate re-use. An IOException isn't expected, but an
+     * OutOfMemoryError is always possible.
      */
     public abstract void recyclePage(long id) throws IOException;
 

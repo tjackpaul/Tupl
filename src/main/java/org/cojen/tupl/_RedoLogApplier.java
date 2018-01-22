@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -31,6 +32,7 @@ final class _RedoLogApplier implements RedoVisitor {
     private final _LocalDatabase mDatabase;
     private final LHashTable.Obj<_LocalTransaction> mTransactions;
     private final LHashTable.Obj<Index> mIndexes;
+    private final LHashTable.Obj<_TreeCursor> mCursors;
 
     long mHighestTxnId;
 
@@ -38,6 +40,14 @@ final class _RedoLogApplier implements RedoVisitor {
         mDatabase = db;
         mTransactions = txns;
         mIndexes = new LHashTable.Obj<>(16);
+        mCursors = new LHashTable.Obj<>(4);
+    }
+
+    void resetCursors() {
+        mCursors.traverse(entry -> {
+            entry.value.close();
+            return false;
+        });
     }
 
     @Override
@@ -57,6 +67,11 @@ final class _RedoLogApplier implements RedoVisitor {
 
     @Override
     public boolean endFile(long timestamp) {
+        return true;
+    }
+
+    @Override
+    public boolean control(byte[] message) {
         return true;
     }
 
@@ -115,6 +130,15 @@ final class _RedoLogApplier implements RedoVisitor {
     }
 
     @Override
+    public boolean txnPrepare(long txnId) throws IOException {
+        _LocalTransaction txn = txn(txnId);
+        if (txn != null) {
+            txn.prepareNoRedo();
+        }
+        return true;
+    }
+
+    @Override
     public boolean txnEnter(long txnId) throws IOException {
         _LocalTransaction txn = txn(txnId);
         if (txn == null) {
@@ -166,6 +190,14 @@ final class _RedoLogApplier implements RedoVisitor {
     }
 
     @Override
+    public boolean txnEnterStore(long txnId, long indexId, byte[] key, byte[] value)
+        throws IOException
+    {
+        txnEnter(txnId);
+        return txnStore(txnId, indexId, key, value);
+    }
+
+    @Override
     public boolean txnStore(long txnId, long indexId, byte[] key, byte[] value)
         throws IOException
     {
@@ -180,11 +212,154 @@ final class _RedoLogApplier implements RedoVisitor {
     }
 
     @Override
+    public boolean txnStoreCommit(long txnId, long indexId, byte[] key, byte[] value)
+        throws IOException
+    {
+        txnStore(txnId, indexId, key, value);
+        return txnCommit(txnId);
+    }
+
+    @Override
     public boolean txnStoreCommitFinal(long txnId, long indexId, byte[] key, byte[] value)
         throws IOException
     {
         txnStore(txnId, indexId, key, value);
         return txnCommitFinal(txnId);
+    }
+
+    @Override
+    public boolean cursorRegister(long cursorId, long indexId) throws IOException {
+        Index ix = openIndex(indexId);
+        if (ix != null) {
+            _TreeCursor c = (_TreeCursor) ix.newCursor(Transaction.BOGUS);
+            c.autoload(false);
+            mCursors.insert(cursorId).value = c;
+        }
+        return true;
+    }
+
+    @Override
+    public boolean cursorUnregister(long cursorId) {
+        LHashTable.ObjEntry<_TreeCursor> entry = mCursors.remove(cursorId);
+        if (entry != null) {
+            entry.value.reset();
+        }
+        return true;
+    }
+
+    @Override
+    public boolean cursorStore(long cursorId, long txnId, byte[] key, byte[] value)
+        throws IOException
+    {
+        LHashTable.ObjEntry<_TreeCursor> entry = mCursors.get(cursorId);
+        if (entry != null) {
+            _LocalTransaction txn = txn(txnId);
+            if (txn != null) {
+                _TreeCursor c = entry.value;
+                c.mTxn = txn;
+                c.findNearby(key);
+                c.store(value);
+                c.mValue = Cursor.NOT_LOADED;
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public boolean cursorFind(long cursorId, long txnId, byte[] key) throws IOException {
+        LHashTable.ObjEntry<_TreeCursor> entry = mCursors.get(cursorId);
+        if (entry != null) {
+            _LocalTransaction txn = txn(txnId);
+            if (txn != null) {
+                _TreeCursor c = entry.value;
+                c.mTxn = txn;
+                c.findNearby(key);
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public boolean cursorValueSetLength(long cursorId, long txnId, long length)
+        throws IOException
+    {
+        LHashTable.ObjEntry<_TreeCursor> entry = mCursors.get(cursorId);
+        if (entry != null) {
+            _LocalTransaction txn = txn(txnId);
+            if (txn != null) {
+                readyCursorValueOp(entry, txn).valueLength(length);
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public boolean cursorValueWrite(long cursorId, long txnId,
+                                    long pos, byte[] buf, int off, int len)
+        throws IOException
+    {
+        LHashTable.ObjEntry<_TreeCursor> entry = mCursors.get(cursorId);
+        if (entry != null) {
+            _LocalTransaction txn = txn(txnId);
+            if (txn != null) {
+                readyCursorValueOp(entry, txn).valueWrite(pos, buf, off, len);
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public boolean cursorValueClear(long cursorId, long txnId, long pos, long length)
+        throws IOException
+    {
+        LHashTable.ObjEntry<_TreeCursor> entry = mCursors.get(cursorId);
+        if (entry != null) {
+            _LocalTransaction txn = txn(txnId);
+            if (txn != null) {
+                readyCursorValueOp(entry, txn).valueClear(pos, length);
+            }
+        }
+        return true;
+    }
+
+    private _TreeCursor readyCursorValueOp(LHashTable.ObjEntry<_TreeCursor> entry,
+                                          _LocalTransaction txn)
+        throws IOException
+    {
+        _TreeCursor c = entry.value;
+        _LocalTransaction oldTxn = c.mTxn;
+        c.mTxn = txn;
+        if (oldTxn != txn) {
+            c.findNearby(c.mKey);
+        }
+        return c;
+    }
+
+    @Override
+    public boolean txnLockShared(long txnId, long indexId, byte[] key) throws IOException {
+        Transaction txn = txn(txnId);
+        if (txn != null) {
+            txn.lockShared(indexId, key);
+        }
+        return true;
+    }
+
+    @Override
+    public boolean txnLockUpgradable(long txnId, long indexId, byte[] key) throws IOException {
+        Transaction txn = txn(txnId);
+        if (txn != null) {
+            txn.lockUpgradable(indexId, key);
+        }
+        return true;
+    }
+
+    @Override
+    public boolean txnLockExclusive(long txnId, long indexId, byte[] key) throws IOException {
+        Transaction txn = txn(txnId);
+        if (txn != null) {
+            txn.lockExclusive(indexId, key);
+        }
+        return true;
     }
 
     @Override

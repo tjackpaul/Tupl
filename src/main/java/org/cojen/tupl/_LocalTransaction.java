@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -19,6 +20,8 @@ package org.cojen.tupl;
 import java.io.IOException;
 
 import java.util.concurrent.TimeUnit;
+
+import static org.cojen.tupl.RedoOps.*;
 
 /**
  * Standard transaction implementation.
@@ -29,21 +32,22 @@ final class _LocalTransaction extends _Locker implements Transaction {
     static final _LocalTransaction BOGUS = new _LocalTransaction();
 
     static final int
-        HAS_SCOPE  = 1, // When set, scope has been entered but not logged.
-        HAS_COMMIT = 2, // When set, transaction has committable changes.
-        HAS_TRASH  = 4; /* When set, fragmented values are in the trash and must be
-                           fully deleted after committing the top-level scope. */
+        HAS_SCOPE   = 1, // When set, scope has been entered but not logged.
+        HAS_COMMIT  = 2, // When set, transaction has committable changes.
+        HAS_TRASH   = 4, /* When set, fragmented values are in the trash and must be
+                            fully deleted after committing the top-level scope. */
+        HAS_PREPARE = 8; // When set, transaction is prepared for two-phase commit.
 
     final _LocalDatabase mDatabase;
-    private final _TransactionContext mTxnContext;
-    private final _RedoWriter mRedoWriter;
+    final _TransactionContext mContext;
+    _RedoWriter mRedo;
     DurabilityMode mDurabilityMode;
 
-    private LockMode mLockMode;
+    LockMode mLockMode;
     long mLockTimeoutNanos;
     private int mHasState;
     private long mSavepoint;
-    private long mTxnId;
+    long mTxnId;
 
     private _UndoLog mUndoLog;
 
@@ -57,8 +61,8 @@ final class _LocalTransaction extends _Locker implements Transaction {
     {
         super(db.mLockManager);
         mDatabase = db;
-        mTxnContext = db.selectTransactionContext(this);
-        mRedoWriter = redo;
+        mContext = db.selectTransactionContext(this);
+        mRedo = redo;
         mDurabilityMode = durabilityMode;
         mLockMode = lockMode;
         mLockTimeoutNanos = timeoutNanos;
@@ -79,6 +83,17 @@ final class _LocalTransaction extends _Locker implements Transaction {
         mHasState = hasState;
     }
 
+    // Constructor for BOGUS transaction.
+    private _LocalTransaction() {
+        super(null);
+        mDatabase = null;
+        mContext = null;
+        mRedo = null;
+        mDurabilityMode = DurabilityMode.NO_REDO;
+        mLockMode = LockMode.UNSAFE;
+        mBorked = this;
+    }
+
     // Used by recovery.
     final void recoveredScope(long savepoint, int hasState) {
         ParentScope parentScope = super.scopeEnter();
@@ -92,19 +107,22 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
     // Used by recovery.
     final void recoveredUndoLog(_UndoLog undo) {
-        mTxnContext.register(undo);
+        mContext.register(undo);
         mUndoLog = undo;
     }
 
-    // Constructor for BOGUS transaction.
-    private _LocalTransaction() {
-        super(null);
-        mDatabase = null;
-        mTxnContext = null;
-        mRedoWriter = null;
-        mDurabilityMode = DurabilityMode.NO_REDO;
-        mLockMode = LockMode.UNSAFE;
-        mBorked = this;
+    // Used by recovery, before passing transaction to a recovery handler.
+    final void recoverPrepared(_RedoWriter redo, DurabilityMode durabilityMode,
+                               LockMode lockMode, long timeoutNanos)
+    {
+        // When recovered from the undo log only, the commit state won't be set. Set it
+        // explicitly now, in order for commit and rollback operations to actually work.
+        mHasState |= HAS_COMMIT;
+
+        mRedo = redo;
+        mLockMode = lockMode;
+        mDurabilityMode = durabilityMode;
+        mLockTimeoutNanos = timeoutNanos;
     }
 
     @Override
@@ -120,7 +138,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
     @Override
     public final void lockMode(LockMode mode) {
         if (mode == null) {
-            throw new IllegalArgumentException("_Lock mode is null");
+            throw new IllegalArgumentException("Lock mode is null");
         } else {
             bogusCheck();
             mLockMode = mode;
@@ -199,12 +217,11 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 if (undo == null) {
                     int hasState = mHasState;
                     if ((hasState & HAS_COMMIT) != 0) {
-                        _RedoWriter redo = mRedoWriter;
-                        long commitPos = redo.txnCommitFinal(mTxnId, mDurabilityMode);
+                        long commitPos = mContext.redoCommitFinal(mRedo, mTxnId, mDurabilityMode);
                         mHasState = hasState & ~(HAS_SCOPE | HAS_COMMIT);
                         if (commitPos != 0) {
                             if (mDurabilityMode == DurabilityMode.SYNC) {
-                                redo.txnCommitSync(this, commitPos);
+                                mRedo.txnCommitSync(this, commitPos);
                             } else {
                                 commitPending(commitPos, null);
                                 return;
@@ -218,12 +235,11 @@ final class _LocalTransaction extends _Locker implements Transaction {
                     // logs with no corresponding redo log are treated as
                     // aborted. Recovery would erroneously rollback committed
                     // transactions.
-                    final CommitLock commitLock = mDatabase.commitLock();
-                    commitLock.lock();
+                    final CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
                     long commitPos;
                     try {
                         if ((commitPos = (mHasState & HAS_COMMIT)) != 0) {
-                            commitPos = mRedoWriter.txnCommitFinal(mTxnId, mDurabilityMode);
+                            commitPos = mContext.redoCommitFinal(mRedo, mTxnId, mDurabilityMode);
                             mHasState &= ~(HAS_SCOPE | HAS_COMMIT);
                         }
                         // Indicates that undo log should be truncated instead
@@ -231,14 +247,14 @@ final class _LocalTransaction extends _Locker implements Transaction {
                         // be released safely. See recoveryCleanup.
                         undo.pushCommit();
                     } finally {
-                        commitLock.unlock();
+                        shared.release();
                     }
 
                     if (commitPos != 0) {
                         // Durably sync the redo log after releasing the commit lock,
                         // preventing additional blocking.
                         if (mDurabilityMode == DurabilityMode.SYNC) {
-                            mRedoWriter.txnCommitSync(this, commitPos);
+                            mRedo.txnCommitSync(this, commitPos);
                         } else {
                             commitPending(commitPos, undo);
                             return;
@@ -256,7 +272,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
                     // to delete ghosts.
                     undo.truncate(true);
 
-                    mTxnContext.unregister(undo);
+                    mContext.unregister(undo);
                     mUndoLog = null;
 
                     int hasState = mHasState;
@@ -270,7 +286,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
             } else {
                 int hasState = mHasState;
                 if ((hasState & HAS_COMMIT) != 0) {
-                    mRedoWriter.txnCommit(mTxnId);
+                    mContext.redoCommit(mRedo, mTxnId);
                     mHasState = hasState & ~(HAS_SCOPE | HAS_COMMIT);
                     parentScope.mHasState |= HAS_COMMIT;
                 }
@@ -283,34 +299,36 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 }
             }
         } catch (Throwable e) {
-            borked(e, true, true);
+            borked(e, true, true); // rollback = true, rethrow = true
         }
     }
 
     private void commitPending(long commitPos, _UndoLog undo) throws IOException {
         _PendingTxn pending = transferExclusive();
-        pending.mTxnContext = mTxnContext;
+        pending.mContext = mContext;
         pending.mTxnId = mTxnId;
         pending.mCommitPos = commitPos;
         pending.mUndoLog = undo;
+        pending.mHasState = mHasState;
         pending.attach(mAttachment);
+
         mUndoLog = null;
-        int hasState = mHasState;
-        if ((hasState & HAS_TRASH) != 0) {
-            pending.mHasFragmentedTrash = true;
-            mHasState = hasState & ~HAS_TRASH;
-        }
+        mHasState = 0;
         mTxnId = 0;
-        mRedoWriter.txnCommitPending(pending);
+
+        mRedo.txnCommitPending(pending);
     }
 
     /**
      * Commit combined with a store operation.
+     *
+     * @param requireUndo true if undo logging is required
      */
-    final void storeCommit(_TreeCursor cursor, byte[] value) throws IOException {
-        _RedoWriter redo = mRedoWriter;
-        if (redo == null) {
-            cursor.store(this, cursor.leafExclusive(), value);
+    final void storeCommit(boolean requireUndo, _TreeCursor cursor, byte[] value)
+        throws IOException
+    {
+        if (mRedo == null) {
+            cursor.storeNoRedo(this, value);
             commit();
             return;
         }
@@ -321,42 +339,51 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
         long txnId = mTxnId;
 
-        final CommitLock commitLock = mDatabase.commitLock();
-        commitLock.lock();
+        final CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
         try {
             if (txnId == 0) {
-                txnId = assignTransactionId(redo);
+                txnId = assignTransactionId();
             }
         } catch (Throwable e) {
-            commitLock.unlock();
+            shared.release();
             throw e;
         }
 
         try {
             int hasState = mHasState;
-            long indexId = cursor.mTree.mId;
             byte[] key = cursor.mKey;
 
             ParentScope parentScope = mParentScope;
             if (parentScope == null) {
                 long commitPos;
                 try {
+                    cursor.storeNoRedo(requireUndo ? this : _LocalTransaction.BOGUS, value);
+
                     if ((hasState & HAS_SCOPE) == 0) {
-                        redo.txnEnter(txnId);
+                        mContext.redoEnter(mRedo, txnId);
                         mHasState = hasState | HAS_SCOPE;
                     }
 
-                    if (value == null) {
-                        commitPos = redo.txnDeleteCommitFinal
-                            (txnId, indexId, key, mDurabilityMode);
+                    long cursorId = cursor.mCursorId;
+                    if (cursorId == 0) {
+                        long indexId = cursor.mTree.mId;
+                        if (value == null) {
+                            commitPos = mContext.redoDeleteCommitFinal
+                                (mRedo, txnId, indexId, key, mDurabilityMode);
+                        } else {
+                            commitPos = mContext.redoStoreCommitFinal
+                                (mRedo, txnId, indexId, key, value, mDurabilityMode);
+                        }
                     } else {
-                        commitPos = redo.txnStoreCommitFinal
-                            (txnId, indexId, key, value, mDurabilityMode);
+                        if (value == null) {
+                            mContext.redoCursorDelete(mRedo, cursorId, txnId, key);
+                        } else {
+                            mContext.redoCursorStore(mRedo, cursorId, txnId, key, value);
+                        }
+                        commitPos = mContext.redoCommitFinal(mRedo, txnId, mDurabilityMode);
                     }
-
-                    cursor.store(_LocalTransaction.BOGUS, cursor.leafExclusive(), value);
                 } catch (Throwable e) {
-                    commitLock.unlock();
+                    shared.release();
                     throw e;
                 }
 
@@ -364,10 +391,10 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
                 _UndoLog undo = mUndoLog;
                 if (undo == null) {
-                    commitLock.unlock();
+                    shared.release();
                     if (commitPos != 0) {
                         if (mDurabilityMode == DurabilityMode.SYNC) {
-                            redo.txnCommitSync(this, commitPos);
+                            mRedo.txnCommitSync(this, commitPos);
                         } else {
                             commitPending(commitPos, null);
                             return;
@@ -378,12 +405,12 @@ final class _LocalTransaction extends _Locker implements Transaction {
                     try {
                         undo.pushCommit();
                     } finally {
-                        commitLock.unlock();
+                        shared.release();
                     }
 
                     if (commitPos != 0) {
                         if (mDurabilityMode == DurabilityMode.SYNC) {
-                            redo.txnCommitSync(this, commitPos);
+                            mRedo.txnCommitSync(this, commitPos);
                         } else {
                             commitPending(commitPos, undo);
                             return;
@@ -394,7 +421,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
                     undo.truncate(true);
 
-                    mTxnContext.unregister(undo);
+                    mContext.unregister(undo);
                     mUndoLog = null;
 
                     if ((hasState & HAS_TRASH) != 0) {
@@ -406,30 +433,49 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 mTxnId = 0;
             } else {
                 try {
-                    if ((hasState & HAS_SCOPE) == 0) {
-                        setScopeState(redo, parentScope);
-                        if (value == null) {
-                            redo.txnDelete(RedoOps.OP_TXN_DELETE, txnId, indexId, key);
+                    // Always undo when inside a scope.
+                    cursor.storeNoRedo(this, value);
+
+                    long cursorId = cursor.mCursorId;
+                    if (cursorId == 0) {
+                        long indexId = cursor.mTree.mId;
+                        if ((hasState & HAS_SCOPE) == 0) {
+                            setScopeState(parentScope);
+                            if (value == null) {
+                                mContext.redoDelete
+                                    (mRedo, OP_TXN_DELETE, txnId, indexId, key);
+                            } else {
+                                mContext.redoStore
+                                    (mRedo, OP_TXN_STORE, txnId, indexId, key, value);
+                            }
                         } else {
-                            redo.txnStore(RedoOps.OP_TXN_STORE, txnId, indexId, key, value);
+                            if (value == null) {
+                                mContext.redoDelete
+                                    (mRedo, OP_TXN_DELETE_COMMIT, txnId, indexId, key);
+                            } else {
+                                mContext.redoStore
+                                    (mRedo, OP_TXN_STORE_COMMIT, txnId, indexId, key, value);
+                            }
                         }
                     } else {
-                        if (value == null) {
-                            redo.txnDelete(RedoOps.OP_TXN_DELETE_COMMIT, txnId, indexId, key);
+                        if ((hasState & HAS_SCOPE) == 0) {
+                            setScopeState(parentScope);
+                            if (value == null) {
+                                mContext.redoCursorDelete(mRedo, cursorId, txnId, key);
+                            } else {
+                                mContext.redoCursorStore(mRedo, cursorId, txnId, key, value);
+                            }
                         } else {
-                            redo.txnStore(RedoOps.OP_TXN_STORE_COMMIT, txnId, indexId, key, value);
+                            if (value == null) {
+                                mContext.redoCursorDelete(mRedo, cursorId, txnId, key);
+                            } else {
+                                mContext.redoCursorStore(mRedo, cursorId, txnId, key, value);
+                            }
+                            mContext.redoCommit(mRedo, txnId);
                         }
                     }
-
-                    final DurabilityMode original = mDurabilityMode;
-                    mDurabilityMode = DurabilityMode.NO_REDO;
-                    try {
-                        cursor.store(this, cursor.leafExclusive(), value);
-                    } finally {
-                        mDurabilityMode = original;
-                    }
                 } finally {
-                    commitLock.unlock();
+                    shared.release();
                 }
 
                 mHasState = hasState & ~(HAS_SCOPE | HAS_COMMIT);
@@ -443,7 +489,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 }
             }
         } catch (Throwable e) {
-            borked(e, true, true);
+            borked(e, true, true); // rollback = true, rethrow = true
         }
     }
 
@@ -477,12 +523,12 @@ final class _LocalTransaction extends _Locker implements Transaction {
             // Scope and commit states are set upon first actual use of this scope.
             mHasState &= ~(HAS_SCOPE | HAS_COMMIT);
         } catch (Throwable e) {
-            borked(e, true, true);
+            borked(e, true, true); // rollback = true, rethrow = true
         }
     }
 
     @Override
-    public final void exit() throws IOException {
+    public final void exit() {
         if (mBorked != null) {
             super.scopeExit();
             return;
@@ -494,7 +540,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 try {
                     int hasState = mHasState;
                     if ((hasState & HAS_SCOPE) != 0) {
-                        mRedoWriter.txnRollbackFinal(mTxnId);
+                        mContext.redoRollbackFinal(mRedo, mTxnId);
                     }
                     mHasState = 0;
                 } catch (UnmodifiableReplicaException e) {
@@ -511,7 +557,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
                 mSavepoint = 0;
                 if (undo != null) {
-                    mTxnContext.unregister(undo);
+                    mContext.unregister(undo);
                     mUndoLog = null;
                 }
 
@@ -520,7 +566,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 try {
                     int hasState = mHasState;
                     if ((hasState & HAS_SCOPE) != 0) {
-                        mRedoWriter.txnRollback(mTxnId);
+                        mContext.redoRollback(mRedo, mTxnId);
                         mHasState = hasState & ~(HAS_SCOPE | HAS_COMMIT);
                     }
                 } catch (UnmodifiableReplicaException e) {
@@ -537,58 +583,79 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
                 mLockMode = parentScope.mLockMode;
                 mLockTimeoutNanos = parentScope.mLockTimeoutNanos;
-                // Use or assignment to promote HAS_TRASH state.
+                // Use 'or' assignment to keep HAS_TRASH and HAS_PREPARE state.
                 mHasState |= parentScope.mHasState;
                 mSavepoint = parentScope.mSavepoint;
             }
         } catch (Throwable e) {
-            borked(e, true, false);
+            borked(e, true, false); // rollback = true, rethrow = false
         }
     }
 
     @Override
-    public final void reset() throws IOException {
-        if (mBorked != null) {
+    public final void reset() {
+        if (mBorked == null) {
+            try {
+                rollback();
+            } catch (Throwable e) {
+                borked(e, true, false); // rollback = true, rethrow = false
+            }
+        } else {
             super.scopeExitAll();
-            return;
+        }
+    }
+
+    @Override
+    public final void reset(Throwable cause) {
+        if (cause == null) {
+            try {
+                reset();
+            } catch (Throwable e) {
+                // Ignore. Transaction is borked as a side-effect.
+            }
+        } else {
+            borked(cause, true, false); // rollback = true, rethrow = false
+        }
+    }
+
+    private void rollback() throws IOException {
+        int hasState = mHasState;
+        ParentScope parentScope = mParentScope;
+        while (parentScope != null) {
+            hasState |= parentScope.mHasState;
+            parentScope = parentScope.mParentScope;
         }
 
         try {
-            try {
-                int hasState = mHasState;
-                ParentScope parentScope = mParentScope;
-                while (parentScope != null) {
-                    if ((hasState & HAS_SCOPE) != 0) {
-                        mRedoWriter.txnRollback(mTxnId);
-                    }
-                    hasState = parentScope.mHasState;
-                    parentScope = parentScope.mParentScope;
-                }
-                if ((hasState & HAS_SCOPE) != 0) {
-                    mRedoWriter.txnRollbackFinal(mTxnId);
-                }
-                mHasState = 0;
-            } catch (UnmodifiableReplicaException e) {
-                // Suppress and let undo proceed.
+            if ((hasState & (HAS_SCOPE | HAS_COMMIT)) != 0) {
+                mContext.redoRollbackFinal(mRedo, mTxnId);
             }
+            mHasState = 0;
+        } catch (UnmodifiableReplicaException e) {
+            // Suppress and let undo proceed.
+        }
 
-            _UndoLog undo = mUndoLog;
-            if (undo != null) {
-                undo.rollback();
-            }
+        _UndoLog undo = mUndoLog;
+        if (undo != null) {
+            undo.rollback();
+        }
 
-            // Exit and release all locks.
-            super.scopeExitAll();
+        // Exit and release all locks.
+        super.scopeExitAll();
 
-            mSavepoint = 0;
-            if (undo != null) {
-                mTxnContext.unregister(undo);
-                mUndoLog = null;
-            }
+        mSavepoint = 0;
+        if (undo != null) {
+            mContext.unregister(undo);
+            mUndoLog = null;
+        }
 
-            mTxnId = 0;
-        } catch (Throwable e) {
-            borked(e, true, false);
+        mTxnId = 0;
+    }
+
+    @Override
+    public void flush() throws IOException {
+        if (mTxnId != 0) {
+            mContext.flush();
         }
     }
 
@@ -675,39 +742,44 @@ final class _LocalTransaction extends _Locker implements Transaction {
             throw new IllegalStateException("Custom transaction handler is not installed");
         }
         check();
-        _RedoWriter redo = mRedoWriter;
-        if (redo != null) {
-            long txnId = mTxnId;
 
-            if (txnId == 0) {
-                final CommitLock commitLock = mDatabase.commitLock();
-                commitLock.lock();
-                try {
-                    txnId = assignTransactionId(redo);
-                } finally {
-                    commitLock.unlock();
-                }
+        if (mRedo == null) {
+            return;
+        }
+
+        long txnId = mTxnId;
+
+        if (txnId == 0) {
+            final CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
+            try {
+                txnId = assignTransactionId();
+            } finally {
+                shared.release();
             }
+        }
 
-            int hasState = mHasState;
-            if ((hasState & HAS_SCOPE) == 0) {
-                ParentScope parentScope = mParentScope;
-                if (parentScope != null) {
-                    setScopeState(redo, parentScope);
-                }
-                redo.txnEnter(txnId);
+        int hasState = mHasState;
+        if ((hasState & HAS_SCOPE) == 0) {
+            ParentScope parentScope = mParentScope;
+            if (parentScope != null) {
+                setScopeState(parentScope);
             }
+            mContext.redoEnter(mRedo, txnId);
+        }
 
-            mHasState = hasState | (HAS_SCOPE | HAS_COMMIT);
+        mHasState = hasState | (HAS_SCOPE | HAS_COMMIT);
 
-            if (indexId == 0) {
-                if (key != null) {
-                    throw new IllegalArgumentException("Key cannot be used if indexId is zero");
-                }
-                redo.txnCustom(txnId, message);
-            } else {
-                redo.txnCustomLock(txnId, message, indexId, key);
+        if (indexId == 0) {
+            if (key != null) {
+                throw new IllegalArgumentException("Key cannot be used if indexId is zero");
             }
+            mContext.redoCustom(mRedo, txnId, message);
+        } else {
+            LockResult result = lockCheck(indexId, key);
+            if (result != LockResult.OWNED_EXCLUSIVE) {
+                throw new IllegalStateException("Lock isn't owned exclusively: " + result);
+            }
+            mContext.redoCustomLock(mRedo, txnId, message, indexId, key);
         }
     }
 
@@ -719,20 +791,99 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
         check();
 
-        final CommitLock commitLock = mDatabase.commitLock();
-        commitLock.lock();
+        final CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
         try {
             undoLog().pushCustom(message);
+        } catch (Throwable e) {
+            borked(e, true, true); // rollback = true, rethrow = true
         } finally {
-            commitLock.unlock();
+            shared.release();
+        }
+    }
+
+    @Override
+    public final long getId() {
+        long txnId = mTxnId;
+
+        if (txnId == 0 && mRedo != null) {
+            final CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
+            try {
+                txnId = assignTransactionId();
+            } finally {
+                shared.release();
+            }
+        }
+
+        return txnId < 0 ? 0 : txnId;
+    }
+
+    @Override
+    public final void prepare() throws IOException {
+        check();
+
+        if (mDatabase.mRecoveryHandler == null) {
+            throw new IllegalStateException("Transaction recovery handler is not installed");
+        }
+
+        if (mRedo == null || mDurabilityMode == DurabilityMode.NO_REDO) {
+            throw new IllegalStateException("Cannot prepare a no-redo transaction");
+        }
+
+        try {
+            if ((mHasState & HAS_PREPARE) == 0) {
+                pushUndoPrepare();
+            }
+
+            // Although it might seem like a good idea to not bother writing the redo message
+            // if the HAS_PREPARE flag is already set, writing it each time makes the prepare
+            // method also useful for performing checked flush operations.
+
+            long commitPos = mContext.redoPrepare(mRedo, txnId(), mDurabilityMode);
+            if (commitPos != 0 && mDurabilityMode == DurabilityMode.SYNC) {
+                mRedo.txnCommitSync(this, commitPos);
+            }
+        } catch (Throwable e) {
+            borked(e, true, true); // rollback = true, rethrow = true
+        }
+
+        mHasState |= HAS_PREPARE;
+    }
+
+    /**
+     * To be called during redo recovery.
+     */
+    final void prepareNoRedo() throws IOException {
+        check();
+
+        try {
+            if ((mHasState & HAS_PREPARE) == 0) {
+                pushUndoPrepare();
+                mHasState |= HAS_PREPARE;
+            }
+        } catch (Throwable e) {
+            borked(e, true, true); // rollback = true, rethrow = true
+        }
+    }
+
+    private void pushUndoPrepare() throws IOException {
+        final CommitLock.Shared shared = mDatabase.commitLock().acquireShared();
+        try {
+            undoLog().pushPrepare();
+        } finally {
+            shared.release();
         }
     }
 
     /**
-     * @param resetAlways when false, only resets committed transactions
+     * Recovery cleanup always resets committed transactions, or those with negative
+     * identifiers. When the finish parameter is false, unfinished transactions aren't reset.
+     * When the finish parameter is true, all non-2PC transactions are reset.
+     *
      * @return true if was reset
      */
-    final boolean recoveryCleanup(boolean resetAlways) throws IOException {
+    final boolean recoveryCleanup(boolean finish) throws IOException {
+        finish = mTxnId < 0 | (finish & (mHasState & HAS_PREPARE) == 0);
+
         _UndoLog undo = mUndoLog;
         if (undo != null) {
             switch (undo.peek(true)) {
@@ -744,22 +895,22 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 // when a checkpoint completes in the middle of the transaction commit
                 // operation. Method truncates undo log as a side-effect.
                 undo.deleteGhosts();
-                resetAlways = true;
+                finish = true;
                 break;
 
             case _UndoLog.OP_COMMIT_TRUNCATE:
                 // Like OP_COMMIT, but ghosts have already been deleted.
                 undo.truncate(false);
-                resetAlways = true;
+                finish = true;
                 break;
             }
         }
 
-        if (resetAlways) {
+        if (finish) {
             reset();
         }
 
-        return resetAlways;
+        return finish;
     }
 
     /**
@@ -770,53 +921,105 @@ final class _LocalTransaction extends _Locker implements Transaction {
     final void redoStore(long indexId, byte[] key, byte[] value) throws IOException {
         check();
 
-        _RedoWriter redo = mRedoWriter;
-        if (redo != null) {
-            long txnId = mTxnId;
+        if (mRedo == null) {
+            return;
+        }
 
-            if (txnId == 0) {
-                txnId = assignTransactionId(redo);
-            }
+        long txnId = mTxnId;
 
-            try {
-                int hasState = mHasState;
-                if ((hasState & HAS_SCOPE) == 0) {
-                    ParentScope parentScope = mParentScope;
-                    if (parentScope != null) {
-                        setScopeState(redo, parentScope);
-                    }
-                    if (value == null) {
-                        redo.txnDelete(RedoOps.OP_TXN_ENTER_DELETE, txnId, indexId, key);
-                    } else {
-                        redo.txnStore(RedoOps.OP_TXN_ENTER_STORE, txnId, indexId, key, value);
-                    }
-                } else {
-                    if (value == null) {
-                        redo.txnDelete(RedoOps.OP_TXN_DELETE, txnId, indexId, key);
-                    } else {
-                        redo.txnStore(RedoOps.OP_TXN_STORE, txnId, indexId, key, value);
-                    }
+        if (txnId == 0) {
+            txnId = assignTransactionId();
+        }
+
+        try {
+            int hasState = mHasState;
+
+            // Set early in case an exception is thrown. Caller is permitted to write redo
+            // entry after making any changes, and setting the commit state ensures that
+            // undo log is not prematurely truncated when commit is called.
+            mHasState = hasState | HAS_COMMIT;
+
+            if ((hasState & HAS_SCOPE) == 0) {
+                ParentScope parentScope = mParentScope;
+                if (parentScope != null) {
+                    setScopeState(parentScope);
                 }
-
+                if (value == null) {
+                    mContext.redoDelete(mRedo, OP_TXN_ENTER_DELETE, txnId, indexId, key);
+                } else {
+                    mContext.redoStore(mRedo, OP_TXN_ENTER_STORE, txnId, indexId, key, value);
+                }
                 mHasState = hasState | (HAS_SCOPE | HAS_COMMIT);
-            } catch (Throwable e) {
-                borked(e, false, true);
+            } else {
+                if (value == null) {
+                    mContext.redoDelete(mRedo, OP_TXN_DELETE, txnId, indexId, key);
+                } else {
+                    mContext.redoStore(mRedo, OP_TXN_STORE, txnId, indexId, key, value);
+                }
             }
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
+        }
+    }
+
+    /**
+     * Caller must hold commit lock.
+     *
+     * @param value pass null for redo delete
+     */
+    final void redoCursorStore(long cursorId, byte[] key, byte[] value) throws IOException {
+        check();
+
+        if (mRedo == null) {
+            return;
+        }
+
+        long txnId = mTxnId;
+
+        if (txnId == 0) {
+            txnId = assignTransactionId();
+        }
+
+        try {
+            int hasState = mHasState;
+
+            // Set early in case an exception is thrown. Caller is permitted to write redo
+            // entry after making any changes, and setting the commit state ensures that
+            // undo log is not prematurely truncated when commit is called.
+            mHasState = hasState | HAS_COMMIT;
+
+            if ((hasState & HAS_SCOPE) == 0) {
+                ParentScope parentScope = mParentScope;
+                if (parentScope != null) {
+                    setScopeState(parentScope);
+                }
+                mContext.redoEnter(mRedo, txnId);
+            }
+
+            if (value == null) {
+                mContext.redoCursorDelete(mRedo, cursorId, txnId, key);
+            } else {
+                mContext.redoCursorStore(mRedo, cursorId, txnId, key, value);
+            }
+
+            mHasState = hasState | (HAS_SCOPE | HAS_COMMIT);
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
         }
     }
 
     /**
      * Transaction id must be assigned.
      */
-    private void setScopeState(_RedoWriter redo, ParentScope scope) throws IOException {
+    private void setScopeState(ParentScope scope) throws IOException {
         int hasState = scope.mHasState;
         if ((hasState & HAS_SCOPE) == 0) {
             ParentScope parentScope = scope.mParentScope;
             if (parentScope != null) {
-                setScopeState(redo, parentScope);
+                setScopeState(parentScope);
             }
 
-            redo.txnEnter(mTxnId);
+            mContext.redoEnter(mRedo, mTxnId);
             scope.mHasState = hasState | HAS_SCOPE;
         }
     }
@@ -827,11 +1030,10 @@ final class _LocalTransaction extends _Locker implements Transaction {
     final long txnId() {
         long txnId = mTxnId;
         if (txnId == 0) {
-            txnId = mTxnContext.nextTransactionId();
-            _RedoWriter redo = mRedoWriter;
-            if (redo != null) {
+            txnId = mContext.nextTransactionId();
+            if (mRedo != null) {
                 // Replicas set the high bit to ensure no identifier conflict with the leader.
-                txnId = redo.adjustTransactionId(txnId);
+                txnId = mRedo.adjustTransactionId(txnId);
             }
             mTxnId = txnId;
         }
@@ -840,15 +1042,96 @@ final class _LocalTransaction extends _Locker implements Transaction {
 
     /**
      * Caller must hold commit lock and have verified that current transaction id is 0.
-     *
-     * @param redo not null
      */
-    private long assignTransactionId(_RedoWriter redo) {
-        long txnId = mTxnContext.nextTransactionId();
+    private long assignTransactionId() {
+        long txnId = mContext.nextTransactionId();
         // Replicas set the high bit to ensure no identifier conflict with the leader.
-        txnId = redo.adjustTransactionId(txnId);
+        txnId = mRedo.adjustTransactionId(txnId);
         mTxnId = txnId;
         return txnId;
+    }
+
+    /**
+     * Attempt to generate an identifier for a cursor to perform direct redo operations.
+     * Caller must hold commit lock.
+     */
+    final boolean tryRedoCursorRegister(_TreeCursor cursor) throws IOException {
+        if (mRedo == null || (mTxnId <= 0 && mRedo.adjustTransactionId(1) <= 0)) {
+            return false;
+        } else {
+            doRedoCursorRegister(cursor);
+            return true;
+        }
+    }
+
+    private long doRedoCursorRegister(_TreeCursor cursor) throws IOException {
+        long cursorId = mContext.nextTransactionId();
+        try {
+            mContext.redoCursorRegister(mRedo, cursorId, cursor.mTree.mId);
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
+        }
+        cursor.mCursorId = cursorId;
+        return cursorId;
+    }
+
+    /**
+     * Caller must hold commit lock.
+     *
+     * @param op OP_SET_LENGTH, OP_WRITE, or OP_CLEAR
+     * @param buf pass EMPTY_BYTES for OP_SET_LENGTH or OP_CLEAR
+     */
+    final void redoCursorValueModify(_TreeCursor cursor, int op,
+                                     long pos, byte[] buf, int off, long len)
+        throws IOException
+    {
+        check();
+
+        if (mRedo == null) {
+            return;
+        }
+
+        long txnId = mTxnId;
+
+        if (txnId == 0) {
+            txnId = assignTransactionId();
+        }
+
+        try {
+            int hasState = mHasState;
+            if ((hasState & HAS_SCOPE) == 0) {
+                ParentScope parentScope = mParentScope;
+                if (parentScope != null) {
+                    setScopeState(parentScope);
+                }
+                mContext.redoEnter(mRedo, txnId);
+            }
+
+            mHasState = hasState | (HAS_SCOPE | HAS_COMMIT);
+
+            long cursorId = cursor.mCursorId;
+
+            if (cursorId < 0) {
+                // High bit set indicates that a redo op was written which positioned the cursor.
+                cursorId &= ~(1L << 63);
+            } else {
+                if (cursorId == 0) {
+                    cursorId = doRedoCursorRegister(cursor);
+                }
+                mContext.redoCursorFind(mRedo, cursorId, txnId, cursor.mKey);
+                cursor.mCursorId = cursorId | (1L << 63);
+            }
+
+            if (op == _TreeValue.OP_SET_LENGTH) {
+                mContext.redoCursorValueSetLength(mRedo, cursorId, txnId, pos);
+            } else if (op == _TreeValue.OP_WRITE) {
+                mContext.redoCursorValueWrite(mRedo, cursorId, txnId, pos, buf, off, (int) len);
+            } else {
+                mContext.redoCursorValueClear(mRedo, cursorId, txnId, pos, len);
+            }
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
+        }
     }
 
     final void setHasTrash() {
@@ -866,9 +1149,9 @@ final class _LocalTransaction extends _Locker implements Transaction {
     {
         check();
         try {
-            undoLog().push(indexId, op, payload, off, len);
+            undoLog().pushNodeEncoded(indexId, op, payload, off, len);
         } catch (Throwable e) {
-            borked(e, false, true);
+            borked(e, false, true); // rollback = false, rethrow = true
         }
     }
 
@@ -878,9 +1161,9 @@ final class _LocalTransaction extends _Locker implements Transaction {
     final void pushUninsert(long indexId, byte[] key) throws IOException {
         check();
         try {
-            undoLog().push(indexId, _UndoLog.OP_UNINSERT, key, 0, key.length);
+            undoLog().pushUninsert(indexId, key);
         } catch (Throwable e) {
-            borked(e, false, true);
+            borked(e, false, true); // rollback = false, rethrow = true
         }
     }
 
@@ -894,9 +1177,59 @@ final class _LocalTransaction extends _Locker implements Transaction {
     {
         check();
         try {
-            undoLog().push(indexId, _UndoLog.OP_UNDELETE_FRAGMENTED, payload, off, len);
+            undoLog().pushNodeEncoded(indexId, _UndoLog.OP_UNDELETE_FRAGMENTED, payload, off, len);
         } catch (Throwable e) {
-            borked(e, false, true);
+            borked(e, false, true); // rollback = false, rethrow = true
+        }
+    }
+
+    /**
+     * Caller must hold commit lock.
+     */
+    final void pushUncreate(long indexId, byte[] key) throws IOException {
+        check();
+        try {
+            undoLog().pushUncreate(indexId, key);
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
+        }
+    }
+
+    /**
+     * Caller must hold commit lock.
+     */
+    final void pushUnextend(long indexId, byte[] key, long length) throws IOException {
+        check();
+        try {
+            undoLog().pushUnextend(mSavepoint, indexId, key, length);
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
+        }
+    }
+
+    /**
+     * Caller must hold commit lock.
+     */
+    final void pushUnalloc(long indexId, byte[] key, long pos, long length) throws IOException {
+        check();
+        try {
+            undoLog().pushUnalloc(indexId, key, pos, length);
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
+        }
+    }
+
+    /**
+     * Caller must hold commit lock.
+     */
+    final void pushUnwrite(long indexId, byte[] key, long pos, long b, int off, int len)
+        throws IOException
+    {
+        check();
+        try {
+            undoLog().pushUnwrite(indexId, key, pos, b, off, len);
+        } catch (Throwable e) {
+            borked(e, false, true); // rollback = false, rethrow = true
         }
     }
 
@@ -914,7 +1247,7 @@ final class _LocalTransaction extends _Locker implements Transaction {
                 parentScope = parentScope.mParentScope;
             }
 
-            mTxnContext.register(undo);
+            mContext.register(undo);
             mUndoLog = undo;
         }
         return undo;
@@ -923,9 +1256,11 @@ final class _LocalTransaction extends _Locker implements Transaction {
     /**
      * Rethrows the given exception or a replacement, unless the database is closed.
      *
-     * @param rollback Rollback should only be performed by user operations -- the public API.
-     * Otherwise a latch deadlock can occur.
-     * @param rethrow true to always throw an exception
+     * @param rollback rollback should only be performed by operations which don't hold tree
+     * node latches; otherwise a latch deadlock can occur as the undo rollback attempts to
+     * apply compensating actions against the tree nodes.
+     * @param rethrow true to always throw an exception; false to suppress rethrowing if
+     * database is known to be closed
      */
     final void borked(Throwable borked, boolean rollback, boolean rethrow) {
         // Note: The mBorked field is set only if the database is closed or if some action in
@@ -934,32 +1269,26 @@ final class _LocalTransaction extends _Locker implements Transaction {
         // called. Any action which releases locks must only do so after it has issued a
         // rollback operation to the undo log.
 
-        boolean closed = mDatabase.mClosed;
+        boolean closed = mDatabase == null ? false : mDatabase.isClosed();
 
         if (mBorked == null) {
             if (closed) {
-                Utils.initCause(borked, mDatabase.mClosedCause);
+                Utils.initCause(borked, mDatabase.closedCause());
                 mBorked = borked;
             } else if (rollback) {
                 // Attempt to rollback the mess and release the locks.
-                _UndoLog undo = mUndoLog;
                 try {
-                    if (undo != null) {
-                        undo.rollback();
-                    }
-                    super.scopeExitAll();
-                    if (undo != null) {
-                        mTxnContext.unregister(undo);
-                        mUndoLog = null;
-                    }
-                } catch (Throwable undoFailed) {
-                    // Undo failed. Locks cannot be released, ensuring other transactions
+                    rollback();
+                } catch (Throwable rollbackFailed) {
+                    // Rollback failed. Locks cannot be released, ensuring other transactions
                     // cannot see the partial changes made by this transaction. A restart is
                     // required, which then performs a clean rollback.
 
+                    Utils.suppress(borked, rollbackFailed);
+
                     // Also panic the database if not done so already.
                     try {
-                        Utils.closeOnFailure(mDatabase, undoFailed);
+                        Utils.closeOnFailure(mDatabase, borked);
                     } catch (Throwable e) {
                         // Ignore.
                     }
@@ -967,10 +1296,6 @@ final class _LocalTransaction extends _Locker implements Transaction {
                     // Discard all of the locks, making it impossible for them to be released
                     // even if the application later calls reset.
                     discardAllLocks();
-
-                    Utils.initCause(borked, mDatabase.mClosedCause);
-                    Utils.initCause(undoFailed, borked);
-                    borked = undoFailed;
                 }
 
                 // Setting this field permits future operations like reset to simply release

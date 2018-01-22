@@ -1,17 +1,18 @@
 /*
- *  Copyright 2011-2015 Cojen.org
+ *  Copyright (C) 2011-2017 Cojen.org
  *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
+ *  This program is free software: you can redistribute it and/or modify
+ *  it under the terms of the GNU Affero General Public License as
+ *  published by the Free Software Foundation, either version 3 of the
+ *  License, or (at your option) any later version.
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU Affero General Public License for more details.
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ *  You should have received a copy of the GNU Affero General Public License
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package org.cojen.tupl;
@@ -21,8 +22,8 @@ import java.io.File;
 import java.io.IOException;
 
 import java.util.Arrays;
-import java.util.Random;
 
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
 import static java.lang.System.arraycopy;
@@ -50,28 +51,26 @@ class Utils extends org.cojen.tupl.io.Utils {
         return (i | (i >> 16)) + 1;
     }
 
-    private static int cRandomMix = new Random().nextInt();
+    static long roundUpPower2(long i) {
+        i--;
+        i |= i >> 1;
+        i |= i >> 2;
+        i |= i >> 4;
+        i |= i >> 8;
+        i |= i >> 16;
+        return (i | (i >> 32)) + 1;
+    }
 
     /**
      * @return non-zero random number, suitable for Xorshift RNG or object hashcode
      */
     static int randomSeed() {
-        int seed = cheapRandom();
-        while (seed == 0) {
-            seed = new Random().nextInt();
-        }
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        int seed;
+        do {
+            seed = rnd.nextInt();
+        } while (seed == 0);
         return seed;
-    }
-
-    /**
-     * @return quickly generated random number, possibly zero
-     */
-    static int cheapRandom() {
-        int value = nextRandom(Long.hashCode(Thread.currentThread().getId()) ^ cRandomMix);
-        // Note the constant increment. This is to avoid getting stuck in an "always zero" rut.
-        // Adding by the magic fibonacci hashing constant provides more mixing than adding 1.
-        cRandomMix = value + 0x61c88647;
-        return value;
     }
 
     /**
@@ -86,6 +85,16 @@ class Utils extends org.cojen.tupl.io.Utils {
     }
 
     /**
+     * Returns a strong non-zero hash code for the given value.
+     */
+    static int nzHash(long v) {
+        int h = hash64to32(v);
+        // n is -1 if h is 0; n is 0 for all other cases
+        int n = ((h & -h) - 1) >> 31;
+        return h + n;
+    }
+
+    /**
      * Apply Wang/Jenkins hash function to given value. Hash is invertible, and
      * so no uniqueness is lost.
      */
@@ -97,6 +106,21 @@ class Utils extends org.cojen.tupl.io.Utils {
         v = (v + (v << 2)) + (v << 4); // v * 21
         v = v ^ (v >>> 28);
         return v + (v << 31);
+    }
+
+    /* 
+      32-bit variant
+      https://gist.github.com/lh3/59882d6b96166dfc3d8d
+    */
+
+    static int hash64to32(long v) {
+        v = (v << 18) - v - 1; // (~v) + (v << 18)
+        v = v ^ (v >>> 31);
+        v = (v + (v << 2)) + (v << 4); // v * 21
+        v = v ^ (v >>> 11);
+        v = v + (v << 6);
+        v = v ^ (v >>> 22);
+        return (int) v;
     }
 
     /*
@@ -115,8 +139,7 @@ class Utils extends org.cojen.tupl.io.Utils {
 
         // Invert v *= 21
         //v *= 14933078535860113213u;
-        //v = (v * 7466539267930056606L) + (v * 7466539267930056607L);
-        v = ((v * 7466539267930056606L) << 1) + v;
+        v *= -3513665537849438403L;
 
         // Invert v = v ^ (v >>> 14)
         tmp = v ^ v >>> 14;
@@ -126,8 +149,7 @@ class Utils extends org.cojen.tupl.io.Utils {
 
         // Invert v *= 265
         //v *= 15244667743933553977u;
-        //v = (v * 7622333871966776988L) + (v * 7622333871966776989L);
-        v = ((v * 7622333871966776988L) << 1) + v;
+        v *= -3202076329775997639L;
 
         // Invert v = v ^ (v >>> 24)
         tmp = v ^ v >>> 24;
@@ -366,7 +388,7 @@ class Utils extends org.cojen.tupl.io.Utils {
      */
     public static long decodeSignedVarLong(byte[] b, IntegerRef offsetRef) {
         long v = decodeUnsignedVarLong(b, offsetRef);
-        return ((v & 1) != 0) ? ((~(v >> 1)) | (1 << 31)) : (v >>> 1);
+        return ((v & 1) != 0) ? ((~(v >> 1)) | (1L << 63)) : (v >>> 1);
     }
 
     /**
@@ -532,6 +554,22 @@ class Utils extends org.cojen.tupl.io.Utils {
     }
 
     /**
+     * Converts a signed int such that it can be efficiently encoded as unsigned. Must be
+     * converted later with decodeSignedVarInt.
+     */
+    public static int convertSignedVarInt(int v) {
+        if (v < 0) {
+            // Complement negative value to turn all the ones to zeros, which
+            // can be compacted. Shift and put sign bit at LSB.
+            v = ((~v) << 1) | 1;
+        } else {
+            // Shift and put sign bit at LSB.
+            v <<= 1;
+        }
+        return v;
+    }
+
+    /**
      * Encode the given integer using 1 to 5 bytes. Values closer to zero are
      * encoded in fewer bytes.
      *
@@ -548,6 +586,14 @@ class Utils extends org.cojen.tupl.io.Utils {
      * @return new offset
      */
     public static int encodeSignedVarInt(byte[] b, int offset, int v) {
+        return encodeUnsignedVarInt(b, offset, convertSignedVarInt(v));
+    }
+
+    /**
+     * Converts a signed long such that it can be efficiently encoded as unsigned. Must be
+     * converted later with decodeSignedVarLong.
+     */
+    public static long convertSignedVarLong(long v) {
         if (v < 0) {
             // Complement negative value to turn all the ones to zeros, which
             // can be compacted. Shift and put sign bit at LSB.
@@ -556,22 +602,14 @@ class Utils extends org.cojen.tupl.io.Utils {
             // Shift and put sign bit at LSB.
             v <<= 1;
         }
-        return encodeUnsignedVarInt(b, offset, v);
+        return v;
     }
 
     /**
      * @return new offset
      */
     public static int encodeSignedVarLong(byte[] b, int offset, long v) {
-        if (v < 0) {
-            // Complement negative value to turn all the ones to zeros, which
-            // can be compacted. Shift and put sign bit at LSB.
-            v = ((~v) << 1) | 1;
-        } else {
-            // Shift and put sign bit at LSB.
-            v <<= 1;
-        }
-        return encodeUnsignedVarLong(b, offset, v);
+        return encodeUnsignedVarLong(b, offset, convertSignedVarLong(v));
     }
 
     public static int calcUnsignedVarLongLength(long v) {
@@ -816,8 +854,15 @@ class Utils extends org.cojen.tupl.io.Utils {
      * @param min delete numbers greater than or equal to this
      */
     static void deleteNumberedFiles(File baseFile, String pattern, long min) throws IOException {
+        File parentFile = baseFile.getParentFile();
+        File[] files;
+        if (parentFile == null || (files = parentFile.listFiles()) == null) {
+            return;
+        }
+
         String prefix = baseFile.getName() + pattern;
-        for (File file : baseFile.getParentFile().listFiles()) {
+
+        for (File file : files) {
             String name = file.getName();
             if (name.startsWith(prefix)) {
                 String suffix = name.substring(prefix.length());
@@ -855,5 +900,46 @@ class Utils extends org.cojen.tupl.io.Utils {
         }
         // Cause chain is quite long, and so it probably has a cycle.
         return true;
+    }
+
+    /**
+     * Augments the stack trace of the given exception with the local stack
+     * trace. Useful for rethrowing exceptions from asynchronous callbacks.
+     */
+    public static void addLocalTrace(Throwable e) {
+        String message = "--- thread transfer ---";
+
+        StackTraceElement[] original = e.getStackTrace();
+        StackTraceElement[] local = new Exception().getStackTrace();
+        if (local.length == 0) {
+            return;
+        }
+
+        StackTraceElement[] merged = new StackTraceElement[local.length + original.length];
+
+        // Append original.
+        System.arraycopy(original, 0, merged, 0, original.length);
+
+        // Append separator.
+        merged[original.length] = new StackTraceElement(message, "", null, -1);
+
+        // Append local trace and omit this method.
+        System.arraycopy(local, 1, merged, original.length + 1, local.length - 1);
+
+        e.setStackTrace(merged);
+    }
+
+    static String toMiniString(Object obj) {
+        StringBuilder b = new StringBuilder();
+        appendMiniString(b, obj);
+        return b.toString();
+    }
+
+    static void appendMiniString(StringBuilder b, Object obj) {
+        if (obj == null) {
+            b.append("null");
+            return;
+        }
+        b.append(obj.getClass().getName()).append('@').append(Integer.toHexString(obj.hashCode()));
     }
 }
