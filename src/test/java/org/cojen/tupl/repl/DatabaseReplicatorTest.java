@@ -26,6 +26,7 @@ import java.util.Arrays;
 
 import java.util.concurrent.TransferQueue;
 import java.util.concurrent.LinkedTransferQueue;
+import java.util.concurrent.TimeUnit;
 
 import java.util.function.Supplier;
 
@@ -132,6 +133,7 @@ public class DatabaseReplicatorTest {
                 .baseFile(mReplBaseFiles[i])
                 .replicate(mReplicators[i])
                 //.eventListener(new EventPrinter())
+                .lockTimeout(5, TimeUnit.SECONDS)
                 .directPageAccess(false);
 
             if (handlerSupplier != null) {
@@ -231,6 +233,22 @@ public class DatabaseReplicatorTest {
 
     @Test
     public void txnPrepare() throws Exception {
+        for (int i=3; --i>=0; ) {
+            try {
+                doTxnPrepare();
+                break;
+            } catch (UnmodifiableReplicaException e) {
+                // Test is load sensitive and leadership is sometimes lost.
+                // https://github.com/cojen/Tupl/issues/70
+                if (i <= 0) {
+                    throw e;
+                }
+                teardown();
+            }
+        }
+    }
+
+    private void doTxnPrepare() throws Exception {
         // Test that unfinished prepared transactions are passed to the new leader.
 
         TransferQueue<Database> recovered = new LinkedTransferQueue<>();
