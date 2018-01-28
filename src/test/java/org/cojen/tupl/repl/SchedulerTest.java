@@ -57,7 +57,7 @@ public class SchedulerTest {
         assertTrue(mScheduler.schedule(task, 100));
         task.runCheck();
         long delay = System.currentTimeMillis() - start;
-        assertTrue("" + delay, delay >= 100 && delay <= 200);
+        assertTrue("" + delay, delay >= 100 && delay <= 500);
 
         task = new Task();
         assertTrue(mScheduler.schedule(task, 100));
@@ -90,7 +90,7 @@ public class SchedulerTest {
         for (Task task : tasks) {
             task.runCheck();
             long deviation = task.actualTime - task.expectedTime;
-            assertTrue("" + deviation, deviation >= 0 && deviation <= 150); 
+            assertTrue("" + deviation, deviation >= 0 && deviation <= 500); 
         }
     }
 

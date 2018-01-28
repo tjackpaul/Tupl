@@ -46,7 +46,7 @@ public class SorterTest {
             .maxCacheSize(100_000_000)
             .durabilityMode(DurabilityMode.NO_FLUSH);
 
-        mDatabase = (LocalDatabase) TestUtils.newTempDatabase(getClass(), config);
+        mDatabase = TestUtils.newTempDatabase(getClass(), config);
     }
 
     @After
@@ -54,7 +54,7 @@ public class SorterTest {
         deleteTempDatabases(getClass());
     }
 
-    private LocalDatabase mDatabase;
+    protected Database mDatabase;
 
     @Test
     public void sortNothing() throws Exception {
@@ -161,6 +161,33 @@ public class SorterTest {
                 c.next();
             }
             assertNull(c.key());
+        }
+    }
+
+    @Test
+    public void largeKeysAndValues() throws Exception {
+        final int count = 5000;
+        final long seed = 394508;
+        Random rnd = new Random(seed);
+
+        Sorter s = mDatabase.newSorter(null);
+
+        for (int i=0; i<count; i++) {
+            byte[] key = randomStr(rnd, 100, 8000);
+            byte[] value = randomStr(rnd, 100, 100_000);
+            s.add(key, value);
+        }
+
+        Index ix = s.finish();
+
+        assertEquals(count, ix.count(null, null));
+
+        rnd = new Random(seed);
+
+        for (int i=0; i<count; i++) {
+            byte[] key = randomStr(rnd, 100, 8000);
+            byte[] value = randomStr(rnd, 100, 100_000);
+            fastAssertArrayEquals(value, ix.load(null, key));
         }
     }
 }
