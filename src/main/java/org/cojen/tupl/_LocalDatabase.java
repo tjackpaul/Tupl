@@ -34,6 +34,7 @@ import java.io.OutputStreamWriter;
 
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
+import java.lang.ref.SoftReference;
 
 import java.math.BigInteger;
 
@@ -47,6 +48,10 @@ import java.util.Map;
 import java.util.Set;
 
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
@@ -59,6 +64,7 @@ import static java.lang.System.arraycopy;
 
 import static java.util.Arrays.fill;
 
+import org.cojen.tupl.ext.RecoveryHandler;
 import org.cojen.tupl.ext.ReplicationManager;
 import org.cojen.tupl.ext.TransactionHandler;
 
@@ -131,6 +137,9 @@ final class _LocalDatabase extends AbstractDatabase {
 
     final TransactionHandler mCustomTxnHandler;
 
+    final RecoveryHandler mRecoveryHandler;
+    private LHashTable.Obj<_LocalTransaction> mRecoveredTransactions;
+
     private final File mBaseFile;
     private final boolean mReadOnly;
     private final LockedFile mLockFile;
@@ -138,6 +147,7 @@ final class _LocalDatabase extends AbstractDatabase {
     final DurabilityMode mDurabilityMode;
     final long mDefaultLockTimeoutNanos;
     final _LockManager mLockManager;
+    private final ThreadLocal<SoftReference<_LocalTransaction>> mLocalTransaction;
     final _RedoWriter mRedoWriter;
     final _PageDb mPageDb;
     final int mPageSize;
@@ -223,6 +233,8 @@ final class _LocalDatabase extends AbstractDatabase {
     final boolean mFullyMapped;
     /*P*/ // ]
 
+    private volatile ExecutorService mSorterExecutor;
+
     private volatile int mClosed;
     private volatile Throwable mClosedCause;
 
@@ -287,6 +299,7 @@ final class _LocalDatabase extends AbstractDatabase {
         config.mEventListener = mEventListener = SafeEventListener.makeSafe(config.mEventListener);
 
         mCustomTxnHandler = config.mTxnHandler;
+        mRecoveryHandler = config.mRecoveryHandler;
 
         mBaseFile = config.mBaseFile;
         mReadOnly = config.mReadOnly;
@@ -341,6 +354,7 @@ final class _LocalDatabase extends AbstractDatabase {
         mDurabilityMode = config.mDurabilityMode;
         mDefaultLockTimeoutNanos = config.mLockTimeoutNanos;
         mLockManager = new _LockManager(this, config.mLockUpgradeRule, mDefaultLockTimeoutNanos);
+        mLocalTransaction = new ThreadLocal<>();
 
         // Initialize NodeMap, the primary cache of Nodes.
         final int procCount = Runtime.getRuntime().availableProcessors();
@@ -808,10 +822,14 @@ final class _LocalDatabase extends AbstractDatabase {
                                      "Processing remaining transactions");
                             }
 
-                            txns.traverse((entry) -> {
-                                entry.value.recoveryCleanup(true);
-                                return false;
+                            txns.traverse(entry -> {
+                                return entry.value.recoveryCleanup(true);
                             });
+
+                            if (shouldInvokeRecoveryHandler(txns)) {
+                                // Invoke the handler later, when database is fully opened.
+                                mRecoveredTransactions = txns;
+                            }
 
                             doCheckpoint = true;
                         }
@@ -900,6 +918,10 @@ final class _LocalDatabase extends AbstractDatabase {
             deletion.start();
         }
 
+        if (mRecoveryHandler != null) {
+            mRecoveryHandler.init(this);
+        }
+
         boolean initialCheckpoint = false;
 
         if (mRedoWriter instanceof _ReplRedoController) {
@@ -936,6 +958,14 @@ final class _LocalDatabase extends AbstractDatabase {
         }
 
         c.start(initialCheckpoint);
+
+        LHashTable.Obj<_LocalTransaction> txns = mRecoveredTransactions;
+        if (txns != null) {
+            new Thread(() -> {
+                invokeRecoveryHandler(txns, mRedoWriter);
+            }).start();
+            mRecoveredTransactions = null;
+        }
     }
 
     private long writeControlMessage(byte[] message) throws IOException {
@@ -993,6 +1023,56 @@ final class _LocalDatabase extends AbstractDatabase {
                 }
             }
         }
+    }
+
+    /**
+     * @return true if a recovery handler exists and should be invoked
+     */
+    boolean shouldInvokeRecoveryHandler(LHashTable.Obj<_LocalTransaction> txns) {
+        if (txns != null && txns.size() != 0) {
+            if (mRecoveryHandler != null) {
+                return true;
+            }
+            if (mEventListener != null) {
+                mEventListener.notify
+                    (EventType.RECOVERY_NO_HANDLER,
+                     "No handler is installed for processing the remaining " +
+                     "two-phase commit transactions: %1$d", txns.size());
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * To be called only when shouldInvokeRecoveryHandler returns true.
+     *
+     * @param redo non-null _RedoWriter assigned to each transaction
+     */
+    void invokeRecoveryHandler(LHashTable.Obj<_LocalTransaction> txns, _RedoWriter redo) {
+        RecoveryHandler handler = mRecoveryHandler;
+
+        txns.traverse(entry -> {
+            _LocalTransaction txn = entry.value;
+            txn.recoverPrepared
+                (redo, mDurabilityMode, LockMode.UPGRADABLE_READ, mDefaultLockTimeoutNanos);
+
+            try {
+                handler.recover(txn);
+            } catch (Throwable e) {
+                if (!isClosed()) {
+                    EventListener listener = mEventListener;
+                    if (listener == null) {
+                        uncaught(e);
+                    } else {
+                        listener.notify(EventType.RECOVERY_HANDLER_UNCAUGHT,
+                                        "Uncaught exception from recovery handler: %1$s", e);
+                    }
+                }
+            }
+
+            return true;
+        });
     }
 
     static class ShutdownPrimer extends ShutdownHook.Weak<_LocalDatabase> {
@@ -1346,6 +1426,45 @@ final class _LocalDatabase extends AbstractDatabase {
     }
 
     /**
+     * Quickly delete an empty temporary tree, which has no active threads and cursors.
+     */
+    void quickDeleteTemporaryTree(_Tree tree) throws IOException {
+        mOpenTreesLatch.acquireExclusive();
+        try {
+            _TreeRef ref = mOpenTreesById.removeValue(tree.mId);
+            if (ref == null || ref.get() != tree) {
+                // _Tree is likely being closed by a concurrent database close.
+                return;
+            }
+            ref.clear();
+        } finally {
+            mOpenTreesLatch.releaseExclusive();
+        }
+
+        _Node root = tree.mRoot;
+
+        prepare: {
+            CommitLock.Shared shared = mCommitLock.acquireShared();
+            try {
+                root.acquireExclusive();
+                if (!root.hasKeys()) {
+                    prepareToDelete(root);
+                    root.releaseExclusive();
+                    break prepare;
+                }
+                root.releaseExclusive();
+            } finally {
+                shared.release();
+            }
+
+            // _Tree isn't truly empty -- it might be composed of many empty leaf nodes.
+            tree.deleteAll();
+        }
+
+        removeFromTrash(tree, root);
+    }
+
+    /**
      * @param lastIdBytes null to start with first
      * @return null if none available
      */
@@ -1472,7 +1591,6 @@ final class _LocalDatabase extends AbstractDatabase {
                     removeFromTrash(mTrashed, root);
                 } else {
                     // Database is closed.
-                    mTrashed = null;
                     return;
                 }
 
@@ -1483,8 +1601,6 @@ final class _LocalDatabase extends AbstractDatabase {
                                      "duration: %3$1.3f seconds",
                                      mTrashed.getId(), mTrashed.getNameString(), duration);
                 }
-
-                mTrashed = null;
             } catch (IOException e) {
                 if (!isClosed() && mListener != null) {
                     mListener.notify
@@ -1494,6 +1610,8 @@ final class _LocalDatabase extends AbstractDatabase {
                 }
                 closeQuietly(mTrashed);
                 return;
+            } finally {
+                mTrashed = null;
             }
 
             if (mResumed) {
@@ -1515,33 +1633,35 @@ final class _LocalDatabase extends AbstractDatabase {
     public _Tree newTemporaryIndex() throws IOException {
         CommitLock.Shared shared = mCommitLock.acquireShared();
         try {
-            return newTemporaryTree(null);
+            return newTemporaryTree(false);
         } finally {
             shared.release();
         }
     }
 
     /**
-     * Caller must hold commit lock.
-     *
-     * @param root pass null to create an empty index; pass an unevictable node otherwise
+     * Caller must hold commit lock. Pass true to preallocate a dirty root node for the tree,
+     * which will be held exclusive. Caller is then responsible for initializing it
      */
-    _Tree newTemporaryTree(_Node root) throws IOException {
+    _Tree newTemporaryTree(boolean preallocate) throws IOException {
         checkClosed();
 
         // Cleanup before opening more trees.
         cleanupUnreferencedTrees();
 
-        byte[] rootIdBytes;
-        if (root == null) {
-            rootIdBytes = EMPTY_BYTES;
-        } else {
-            rootIdBytes = new byte[8];
-            encodeLongLE(rootIdBytes, 0, root.mId);
-        }
-
         long treeId;
         byte[] treeIdBytes = new byte[8];
+
+        long rootId;
+        byte[] rootIdBytes;
+
+        if (preallocate) {
+            rootId = mPageDb.allocPage();
+            rootIdBytes = new byte[8];
+        } else {
+            rootId = 0;
+            rootIdBytes = EMPTY_BYTES;
+        }
 
         try {
             do {
@@ -1561,6 +1681,46 @@ final class _LocalDatabase extends AbstractDatabase {
             } finally {
                 createTxn.reset();
             }
+
+            _Node root;
+            if (rootId != 0) {
+                root = allocLatchedNode(rootId, _NodeContext.MODE_UNEVICTABLE);
+                root.mId = rootId;
+                try {
+                    // Note: Same as redirty method, except mPage is assigned when fully mapped.
+                    // The redirty method assumes that the page doesn't change.
+                    /*P*/ // [|
+                    if (mFullyMapped) {
+                        root.mPage = mPageDb.dirtyPage(rootId);
+                    }
+                    /*P*/ // ]
+                    root.mContext.addDirty(root, mCommitState);
+                } catch (Throwable e) {
+                    root.releaseExclusive();
+                    throw e;
+                }
+            } else {
+                root = loadTreeRoot(treeId, 0);
+            }
+
+            try {
+                _Tree tree = new _TempTree(this, treeId, treeIdBytes, root);
+                _TreeRef treeRef = new _TreeRef(tree, mOpenTreesRefQueue);
+
+                mOpenTreesLatch.acquireExclusive();
+                try {
+                    mOpenTreesById.insert(treeId).value = treeRef;
+                } finally {
+                    mOpenTreesLatch.releaseExclusive();
+                }
+
+                return tree;
+            } catch (Throwable e) {
+                if (rootId != 0) {
+                    root.releaseExclusive();
+                }
+                throw e;
+            }
         } catch (Throwable e) {
             try {
                 mRegistry.delete(Transaction.BOGUS, treeIdBytes);
@@ -1568,24 +1728,15 @@ final class _LocalDatabase extends AbstractDatabase {
                 // Panic.
                 throw closeOnFailure(this, e);
             }
+            if (rootId != 0) {
+                try {
+                    mPageDb.recyclePage(rootId);
+                } catch (Throwable e2) {
+                    Utils.suppress(e, e2);
+                }
+            }
             throw e;
         }
-
-        if (root == null) {
-            root = loadTreeRoot(treeId, 0);
-        }
-
-        _Tree tree = new _TempTree(this, treeId, treeIdBytes, root);
-        _TreeRef treeRef = new _TreeRef(tree, mOpenTreesRefQueue);
-
-        mOpenTreesLatch.acquireExclusive();
-        try {
-            mOpenTreesById.insert(treeId).value = treeRef;
-        } finally {
-            mOpenTreesLatch.releaseExclusive();
-        }
-
-        return tree;
     }
 
     @Override
@@ -1608,13 +1759,13 @@ final class _LocalDatabase extends AbstractDatabase {
         return doNewTransaction(durabilityMode == null ? mDurabilityMode : durabilityMode);
     }
 
-    _LocalTransaction doNewTransaction(DurabilityMode durabilityMode) {
+    private _LocalTransaction doNewTransaction(DurabilityMode durabilityMode) {
         _RedoWriter redo = txnRedoWriter();
         return new _LocalTransaction
             (this, redo, durabilityMode, LockMode.UPGRADABLE_READ, mDefaultLockTimeoutNanos);
     }
 
-    _LocalTransaction newAlwaysRedoTransaction() {
+    private _LocalTransaction newAlwaysRedoTransaction() {
         return doNewTransaction(mDurabilityMode.alwaysRedo());
     }
 
@@ -1622,7 +1773,7 @@ final class _LocalDatabase extends AbstractDatabase {
      * Convenience method which returns a transaction intended for locking and undo. Caller can
      * make modifications, but they won't go to the redo log.
      */
-    _LocalTransaction newNoRedoTransaction() {
+    private _LocalTransaction newNoRedoTransaction() {
         return doNewTransaction(DurabilityMode.NO_REDO);
     }
 
@@ -1632,10 +1783,32 @@ final class _LocalDatabase extends AbstractDatabase {
      *
      * @param redoTxnId non-zero if operation is performed by recovery
      */
-    _LocalTransaction newNoRedoTransaction(long redoTxnId) {
+    private _LocalTransaction newNoRedoTransaction(long redoTxnId) {
         return redoTxnId == 0 ? newNoRedoTransaction() :
             new _LocalTransaction(this, redoTxnId, LockMode.UPGRADABLE_READ,
                                  mDefaultLockTimeoutNanos);
+    }
+
+    /**
+     * Returns a transaction which should be briefly used and reset.
+     */
+    _LocalTransaction threadLocalTransaction(DurabilityMode durabilityMode) {
+        SoftReference<_LocalTransaction> txnRef = mLocalTransaction.get();
+        _LocalTransaction txn;
+        if (txnRef == null || (txn = txnRef.get()) == null) {
+            txn = doNewTransaction(durabilityMode);
+            mLocalTransaction.set(new SoftReference<>(txn));
+        } else {
+            txn.mRedo = txnRedoWriter();
+            txn.mDurabilityMode = durabilityMode;
+            txn.mLockMode = LockMode.UPGRADABLE_READ;
+            txn.mLockTimeoutNanos = mDefaultLockTimeoutNanos;
+        }
+        return txn;
+    }
+
+    void removeThreadLocalTransaction() {
+        mLocalTransaction.remove();
     }
 
     /**
@@ -1673,17 +1846,6 @@ final class _LocalDatabase extends AbstractDatabase {
         return mTxnContexts[(num & 0x7fffffff) % mTxnContexts.length];
     }
 
-    /**
-     * Returns the transaction context with the highest confirmed position.
-     */
-    _TransactionContext highestTransactionContext() {
-        _TransactionContext context = mTxnContexts[0];
-        for (int i=1; i<mTxnContexts.length; i++) {
-            context = context.higherConfirmed(mTxnContexts[i]);
-        }
-        return context;
-    }
-
     @Override
     public long preallocate(long bytes) throws IOException {
         if (!isClosed() && mPageDb.isDurable()) {
@@ -1704,6 +1866,31 @@ final class _LocalDatabase extends AbstractDatabase {
             }
         }
         return 0;
+    }
+
+    @Override
+    public Sorter newSorter(Executor executor) throws IOException {
+        if (executor == null && (executor = mSorterExecutor) == null) {
+            mOpenTreesLatch.acquireExclusive();
+            try {
+                checkClosed();
+                executor = mSorterExecutor;
+                if (executor == null) {
+                    ExecutorService es = Executors.newCachedThreadPool(r -> {
+                        Thread t = new Thread(r);
+                        t.setDaemon(true);
+                        t.setName("Sorter-" + Long.toUnsignedString(t.getId()));
+                        return t;
+                    });
+                    mSorterExecutor = es;
+                    executor = es;
+                }
+            } finally {
+                mOpenTreesLatch.releaseExclusive();
+            }
+        }
+
+        return new _ParallelSorter(this, executor);
     }
 
     @Override
@@ -2088,7 +2275,7 @@ final class _LocalDatabase extends AbstractDatabase {
             final long highestNodeId = targetPageCount - 1;
             final CompactionObserver fobserver = observer;
 
-            completed = scanAllIndexes((tree) -> {
+            completed = scanAllIndexes(tree -> {
                 return tree.compactTree(tree.observableView(), highestNodeId, fobserver);
             });
 
@@ -2136,7 +2323,7 @@ final class _LocalDatabase extends AbstractDatabase {
         final boolean[] passedRef = {true};
         final VerificationObserver fobserver = observer;
 
-        scanAllIndexes((tree) -> {
+        scanAllIndexes(tree -> {
             Index view = tree.observableView();
             fobserver.failed = false;
             boolean keepGoing = tree.verifyTree(view, fobserver);
@@ -2288,7 +2475,7 @@ final class _LocalDatabase extends AbstractDatabase {
                     try {
                         trees = new ArrayList<>(mOpenTreesById.size());
 
-                        mOpenTreesById.traverse((entry) -> {
+                        mOpenTreesById.traverse(entry -> {
                             trees.add(entry.value);
                             return true;
                         });
@@ -2329,6 +2516,11 @@ final class _LocalDatabase extends AbstractDatabase {
                 lock.acquireExclusive();
             }
             try {
+                if (mSorterExecutor != null) {
+                    mSorterExecutor.shutdown();
+                    mSorterExecutor = null;
+                }
+
                 if (mNodeContexts != null) {
                     for (_NodeContext context : mNodeContexts) {
                         if (context != null) {
@@ -2520,6 +2712,29 @@ final class _LocalDatabase extends AbstractDatabase {
             throw closeOnFailure(this, e);
         } finally {
             shared.release();
+        }
+    }
+
+    /**
+     * Removes all references to a temporary tree which was grafted to another one. Caller must
+     * hold shared commit lock.
+     */
+    void removeGraftedTempTree(_Tree tree) throws IOException {
+        try {
+            mOpenTreesLatch.acquireExclusive();
+            try {
+                _TreeRef ref = mOpenTreesById.removeValue(tree.mId);
+                if (ref != null && ref.get() == tree) {
+                    ref.clear();
+                }
+            } finally {
+                mOpenTreesLatch.releaseExclusive();
+            }
+            byte[] trashIdKey = newKey(KEY_TYPE_TRASH_ID, tree.mIdBytes);
+            mRegistryKeyMap.delete(Transaction.BOGUS, trashIdKey);
+            mRegistry.delete(Transaction.BOGUS, tree.mIdBytes);
+        } catch (Throwable e) {
+            throw closeOnFailure(this, e);
         }
     }
 
@@ -3433,6 +3648,161 @@ final class _LocalDatabase extends AbstractDatabase {
 
             return;
         }
+    }
+
+    /**
+     * With parent held shared, returns child with shared latch held, releasing the parent
+     * latch. If an exception is thrown, parent and child latches are always released.
+     *
+     * @return child node, possibly split
+     */
+    final _Node latchToChild(_Node parent, int childPos) throws IOException {
+        return latchChild(parent, childPos, _Node.OPTION_PARENT_RELEASE_SHARED);
+    }
+
+    /**
+     * With parent held shared, returns child with shared latch held, retaining the parent
+     * latch. If an exception is thrown, parent and child latches are always released.
+     *
+     * @return child node, possibly split
+     */
+    final _Node latchChildRetainParent(_Node parent, int childPos) throws IOException {
+        return latchChild(parent, childPos, 0);
+    }
+
+    /**
+     * With parent held shared, returns child with shared latch held. If an exception is
+     * thrown, parent and child latches are always released.
+     *
+     * @param option _Node.OPTION_PARENT_RELEASE_SHARED or 0 to retain latch
+     * @return child node, possibly split
+     */
+    final _Node latchChild(_Node parent, int childPos, int option) throws IOException {
+        long childId = parent.retrieveChildRefId(childPos);
+        _Node childNode = nodeMapGetShared(childId);
+
+        tryFind: if (childNode != null) {
+            checkChild: {
+                evictChild: if (childNode.mCachedState != _Node.CACHED_CLEAN
+                                && parent.mCachedState == _Node.CACHED_CLEAN
+                                // Must be a valid parent -- not a stub from _Node.rootDelete.
+                                && parent.mId > 1)
+                {
+                    // Parent was evicted before child. Evict child now and mark as clean. If
+                    // this isn't done, the notSplitDirty method will short-circuit and not
+                    // ensure that all the parent nodes are dirty. The splitting and merging
+                    // code assumes that all nodes referenced by the cursor are dirty. The
+                    // short-circuit check could be skipped, but then every change would
+                    // require a full latch up the tree. Another option is to remark the parent
+                    // as dirty, but this is dodgy and also requires a full latch up the tree.
+                    // Parent-before-child eviction is infrequent, and so simple is better.
+
+                    if (!childNode.tryUpgrade()) {
+                        childNode.releaseShared();
+                        childNode = nodeMapGetExclusive(childId);
+                        if (childNode == null) {
+                            break tryFind;
+                        }
+                        if (childNode.mCachedState == _Node.CACHED_CLEAN) {
+                            // Child state which was checked earlier changed when its latch was
+                            // released, and now it shoudn't be evicted.
+                            childNode.downgrade();
+                            break evictChild;
+                        }
+                    }
+
+                    if (option == _Node.OPTION_PARENT_RELEASE_SHARED) {
+                        parent.releaseShared();
+                    }
+
+                    try {
+                        childNode.write(mPageDb);
+                    } catch (Throwable e) {
+                        childNode.releaseExclusive();
+                        if (option == 0) {
+                            // Release due to exception.
+                            parent.releaseShared();
+                        }
+                        throw e;
+                    }
+
+                    childNode.mCachedState = _Node.CACHED_CLEAN;
+                    childNode.downgrade();
+                    break checkChild;
+                }
+
+                if (option == _Node.OPTION_PARENT_RELEASE_SHARED) {
+                    parent.releaseShared();
+                }
+            }
+
+            childNode.used(ThreadLocalRandom.current());
+            return childNode;
+        }
+
+        return parent.loadChild(this, childId, option);
+    }
+
+    /**
+     * Variant of latchChildRetainParent which uses exclusive latches. With parent held
+     * exclusively, returns child with exclusive latch held, retaining the parent latch. If an
+     * exception is thrown, parent and child latches are always released.
+     *
+     * @param required pass false to allow null to be returned when child isn't immediately
+     * latchable; passing false still permits the child to be loaded if necessary
+     * @return child node, possibly split
+     */
+    final _Node latchChildRetainParentEx(_Node parent, int childPos, boolean required)
+        throws IOException
+    {
+        long childId = parent.retrieveChildRefId(childPos);
+
+        _Node childNode;
+        while (true) {
+            childNode = nodeMapGet(childId);
+
+            if (childNode != null) {
+                if (required) {
+                    childNode.acquireExclusive();
+                } else if (!childNode.tryAcquireExclusive()) {
+                    return null;
+                }
+                if (childId == childNode.mId) {
+                    break;
+                }
+                childNode.releaseExclusive();
+                continue;
+            }
+
+            return parent.loadChild(this, childId, _Node.OPTION_CHILD_ACQUIRE_EXCLUSIVE);
+        }
+
+        if (childNode.mCachedState != _Node.CACHED_CLEAN
+            && parent.mCachedState == _Node.CACHED_CLEAN
+            // Must be a valid parent -- not a stub from _Node.rootDelete.
+            && parent.mId > 1)
+        {
+            // Parent was evicted before child. Evict child now and mark as clean. If
+            // this isn't done, the notSplitDirty method will short-circuit and not
+            // ensure that all the parent nodes are dirty. The splitting and merging
+            // code assumes that all nodes referenced by the cursor are dirty. The
+            // short-circuit check could be skipped, but then every change would
+            // require a full latch up the tree. Another option is to remark the parent
+            // as dirty, but this is dodgy and also requires a full latch up the tree.
+            // Parent-before-child eviction is infrequent, and so simple is better.
+            try {
+                childNode.write(mPageDb);
+            } catch (Throwable e) {
+                childNode.releaseExclusive();
+                // Release due to exception.
+                parent.releaseExclusive();
+                throw e;
+            }
+            childNode.mCachedState = _Node.CACHED_CLEAN;
+        }
+
+        childNode.used(ThreadLocalRandom.current());
+        return childNode;
     }
 
     /**

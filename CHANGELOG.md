@@ -1,9 +1,23 @@
 Changelog
 =========
 
-v1.4.0
+v1.4.1
 ------
 
+* Honor the default durability mode when using a null transaction. Previously, when the default
+  mode is NO_REDO and the transaction is null, a redo log entry would still be created. Also
+  honor the transaction-specified durability mode when using the unsafe locking mode. Previously,
+  the default durability mode would be used.
+* Added support two-phase commit, using the new transaction prepare and getId methods.
+* Added a parallel external mergesort utility.
+
+v1.4.0.2 (2018-01-21)
+--------
+* Fix bug when deleting entries from the largest allowed page size, 65536 bytes. Under the right
+  conditions, the internal search vector pointer would overflow the 16-bit range.
+
+v1.4.0.1 (2018-01-01)
+--------
 * Added a RAFT-based replication system.
 * Added a ValueAccessor interface which supports very large values (>2Gib), random access,
   appending, truncation, zero-filling, and streams.
@@ -29,6 +43,8 @@ v1.4.0
 * Incomplete database restoration is now detected, causing an IncompleteRestoreException to be
   thrown when opening the database.
 * Unpositioned cursors now throw a specialized exception, still extending IllegalStateException.
+* The index exchange/insert/replace/update operations are now always atomic, even when using
+  the BOGUS transaction.
 
 v1.3.12.3 (2017-05-20)
 ---------

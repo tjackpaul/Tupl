@@ -61,6 +61,7 @@ public class TestAll {
             ExtraLargeValueTest.class,
             ExtraLargeValueDirectTest.class,
             ExtraLargeValueNonDurableTest.class,
+            LargePageTest.class,
             FileIOTest.class,
             LockTest.class,
             DeadlockTest.class,
@@ -116,6 +117,11 @@ public class TestAll {
             UnionViewTest.class,
             ScannerTest.class,
             UpdaterTest.class,
+            TxnPrepareTest.class,
+            TreeGraftTest.class,
+            TreeMergerTest.class,
+            SorterTest.class,
+            SorterDirectTest.class,
         };
 
         String[] names = new String[classes.length];
