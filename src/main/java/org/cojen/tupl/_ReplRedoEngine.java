@@ -851,6 +851,30 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
         return true;
     }
 
+    @Override
+    public boolean cursorSortRegister(long cursorId, long txnId) throws IOException {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public boolean cursorSortAppend(long cursorId, byte[] key, byte[] value) throws IOException {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public boolean cursorSortGraft(long cursorId, long otherCursorId) throws IOException {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public boolean cursorSortFinish(long cursorId, long indexId, byte[] name) throws IOException {
+        // FIXME
+        throw null;
+    }
+
     private void runCursorTask(CursorEntry ce, TxnEntry te, Worker.Task task) {
         Worker w = ce.mWorker;
         if (w == null) {

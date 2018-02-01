@@ -93,6 +93,9 @@ final class UndoLog implements DatabaseAccess {
     // Indicates that transaction has been prepared for two-phase commit.
     static final byte OP_PREPARE = (byte) 6;
 
+    // Index must be deleted if transaction rolls back.
+    static final byte OP_UNCREATE_INDEX = (byte) 11;
+
     // Same as OP_UNINSERT, except uses OP_ACTIVE_KEY. (ValueAccessor op)
     static final byte OP_UNCREATE = (byte) 12;
 
@@ -463,6 +466,14 @@ final class UndoLog implements DatabaseAccess {
         byte[] b = new byte[len];
         DirectPageOps.p_copyToArray(ptr, off, b, 0, len);
         pushUnwrite(indexId, key, pos, b, 0, len);
+    }
+
+    /**
+     * Caller must hold db commit lock.
+     */
+    void pushUncreateIndex(long indexId) throws IOException {
+        setActiveIndexId(indexId);
+        doPush(OP_UNCREATE_INDEX);
     }
 
     /**
@@ -848,6 +859,7 @@ final class UndoLog implements DatabaseAccess {
             case OP_COMMIT:
             case OP_COMMIT_TRUNCATE:
             case OP_PREPARE:
+            case OP_UNCREATE_INDEX:
             case OP_UNCREATE:
             case OP_UNINSERT:
             case OP_UNUPDATE:
@@ -934,6 +946,19 @@ final class UndoLog implements DatabaseAccess {
         case OP_INDEX:
             mActiveIndexId = decodeLongLE(entry, 0);
             activeIndex = null;
+            break;
+
+        case OP_UNCREATE_INDEX:
+            while ((activeIndex = findIndex(activeIndex)) != null) {
+                try {
+                    // FIXME: Consider using a special index deletion thread.
+                    mDatabase.deleteIndex(activeIndex).run();
+                    break;
+                } catch (ClosedIndexException e) {
+                    // User closed the shared index reference, so re-open it.
+                    activeIndex = null;
+                }
+            }
             break;
 
         case OP_UNCREATE:
@@ -1527,6 +1552,7 @@ final class UndoLog implements DatabaseAccess {
                 }
                 break;
 
+            case OP_UNCREATE_INDEX:
             case OP_CUSTOM:
                 break;
 

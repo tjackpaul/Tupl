@@ -20,6 +20,8 @@ package org.cojen.tupl;
 import java.io.InterruptedIOException;
 import java.io.IOException;
 
+import java.nio.charset.StandardCharsets;
+
 /**
  * Utility for sorting and filling up new indexes.
  *
@@ -37,12 +39,36 @@ public interface Sorter {
     public void add(byte[] key, byte[] value) throws IOException;
 
     /**
-     * Finish sorting the entries, and return a temporary index with the results.
+     * Finish sorting the entries, and return a temporary index with the results. Be sure to
+     * {@link Database#deleteIndex delete} it when the results aren't needed any more.
      *
      * @throws IllegalStateException if sort is finishing in another thread
      * @throws InterruptedIOException if reset by another thread
      */
     public Index finish() throws IOException;
+
+    /**
+     * Finish sorting the entries, and return a named index with the results.
+     *
+     * @param mode pass null to use the {@link DatabaseConfig#durabilityMode default} mode
+     * @throws IllegalStateException if sort is finishing in another thread, or if index name
+     * is already taken
+     * @throws InterruptedIOException if reset by another thread
+     */
+    public Index finish(byte[] name, DurabilityMode mode) throws IOException;
+
+    /**
+     * Finish sorting the entries, and return a named index with the results. Name is UTF-8
+     * encoded.
+     *
+     * @param mode pass null to use the {@link DatabaseConfig#durabilityMode default} mode
+     * @throws IllegalStateException if sort is finishing in another thread, or if index name
+     * is already taken
+     * @throws InterruptedIOException if reset by another thread
+     */
+    public default Index finish(String name, DurabilityMode mode) throws IOException {
+        return finish(name.getBytes(StandardCharsets.UTF_8), mode);
+    }
 
     /**
      * Returns an approximate count of entries which have finished, which is only updated when

@@ -232,7 +232,7 @@ final class _RedoLogApplier implements RedoVisitor {
         Index ix = openIndex(indexId);
         if (ix != null) {
             _TreeCursor c = (_TreeCursor) ix.newCursor(Transaction.BOGUS);
-            c.autoload(false);
+            c.mKeyOnly = true;
             mCursors.insert(cursorId).value = c;
         }
         return true;
@@ -333,6 +333,36 @@ final class _RedoLogApplier implements RedoVisitor {
             c.findNearby(c.mKey);
         }
         return c;
+    }
+
+    @Override
+    public boolean cursorSortRegister(long cursorId, long txnId) throws IOException {
+        Transaction txn = txn(txnId);
+        if (txn != null) {
+            Index ix = mDatabase.newTemporaryIndex();
+            _TreeCursor c = (_TreeCursor) ix.newCursor(Transaction.BOGUS);
+            c.mKeyOnly = true;
+            mCursors.insert(cursorId).value = c;
+        }
+        throw null;
+    }
+
+    @Override
+    public boolean cursorSortAppend(long cursorId, byte[] key, byte[] value) throws IOException {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public boolean cursorSortGraft(long cursorId, long otherCursorId) throws IOException {
+        // FIXME
+        throw null;
+    }
+
+    @Override
+    public boolean cursorSortFinish(long cursorId, long indexId, byte[] name) throws IOException {
+        // FIXME
+        throw null;
     }
 
     @Override

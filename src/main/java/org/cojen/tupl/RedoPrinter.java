@@ -215,6 +215,32 @@ class RedoPrinter implements RedoVisitor {
     }
 
     @Override
+    public boolean cursorSortRegister(long cursorId, long txnId) {
+        mOut.println("cursorSortRegister: cursorId=" + cursorId + ", txnId=" + txnId);
+        return true;
+    }
+
+    @Override
+    public boolean cursorSortAppend(long cursorId, byte[] key, byte[] value) {
+        mOut.println("cursorSortAppend: cursorId=" + cursorId +
+                     ", key=" + toHex(key) + ", value=" + toHex(value));
+        return true;
+    }
+
+    @Override
+    public boolean cursorSortGraft(long cursorId, long otherCursorId) {
+        mOut.println("cursorSortGraft: cursorId=" + cursorId + ", otherCursorId=" + otherCursorId);
+        return true;
+    }
+
+    @Override
+    public boolean cursorSortFinish(long cursorId, long indexId, byte[] name) {
+        mOut.println("cursorSortFinish: cursorId=" + cursorId +
+                     ", indexId=" + indexId + ", name=" + toHex(name));
+        return true;
+    }
+
+    @Override
     public boolean txnLockShared(long txnId, long indexId, byte[] key) {
         mOut.println("txnLockShared: txnId=" + txnId + ", indexId=" + indexId +
                      ", key=" + toHex(key));

@@ -221,6 +221,36 @@ interface RedoVisitor {
         throws IOException;
 
     /**
+     * @param cursorId non-zero cursor id
+     * @param txnId non-zero transaction id
+     * @return false to stop visiting
+     */
+    public boolean cursorSortRegister(long cursorId, long txnId) throws IOException;
+
+    /**
+     * @param cursorId non-zero cursor id
+     * @param key non-null key
+     * @param value non-null value
+     * @return false to stop visiting
+     */
+    public boolean cursorSortAppend(long cursorId, byte[] key, byte[] value) throws IOException;
+
+    /**
+     * @param cursorId non-zero cursor id
+     * @param otherCursorId non-zero cursor id
+     * @return false to stop visiting
+     */
+    public boolean cursorSortGraft(long cursorId, long otherCursorId) throws IOException;
+
+    /**
+     * @param cursorId non-zero cursor id
+     * @param indexId non-zero index id
+     * @param name non-null new index name
+     * @return false to stop visiting
+     */
+    public boolean cursorSortFinish(long cursorId, long indexId, byte[] name) throws IOException;
+
+    /**
      * @param txnId non-zero transaction id
      * @param indexId non-zero index id
      * @param key non-null key

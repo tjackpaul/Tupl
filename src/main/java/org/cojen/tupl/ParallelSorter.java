@@ -25,6 +25,7 @@ import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 import java.util.concurrent.Executor;
 
@@ -164,6 +165,18 @@ final class ParallelSorter implements Sorter, Node.Supplier {
             }
             throw e;
         }
+    }
+
+    @Override
+    public Index finish(byte[] name, DurabilityMode mode) throws IOException {
+        Objects.requireNonNull(name);
+
+        if (mode == null) {
+            mode = mDatabase.mDurabilityMode;
+        }
+
+        // FIXME
+        throw null;
     }
 
     private Tree doFinish() throws IOException {

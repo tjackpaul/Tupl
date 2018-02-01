@@ -150,7 +150,7 @@ class _TreeCursor extends AbstractValueAccessor implements CauseCloseable, Curso
         if (mCursorId == 0) {
             _LocalTransaction txn = mTxn;
             if (txn == null) {
-                if (storeMode() < 1) {
+                if (storeMode() > 1) {
                     // Never redo.
                     return false;
                 }

@@ -152,6 +152,18 @@ class RedoOps {
         /** cursorId: delta, txnId: delta, pos: varLong, length: varLong */
         OP_CURSOR_VALUE_CLEAR = 47,
 
+        /** cursorId: delta, txnId: delta */
+        OP_CURSOR_SORT_REGISTER = 48,
+
+        /** cursorId: delta, keyLength: varInt, key: bytes, valueLength: varInt, value: bytes */
+        OP_CURSOR_SORT_APPEND = 49,
+
+        /** cursorId: delta, otherCursorId: delta */
+        OP_CURSOR_SORT_GRAFT = 50,
+
+        /** cursorId: delta, indexId: long, nameLength: varInt, name: bytes */
+        OP_CURSOR_SORT_FINISH = 51,
+
         /** txnId: delta, dataLength: varInt, data: bytes */
         OP_TXN_CUSTOM = (byte) 128,
 

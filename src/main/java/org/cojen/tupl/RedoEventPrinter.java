@@ -214,6 +214,34 @@ class RedoEventPrinter implements RedoVisitor {
     }
 
     @Override
+    public boolean cursorSortRegister(long cursorId, long txnId) {
+        mListener.notify(mType, "Redo %1$s: cursorId=%2$d, txnId=%3$d",
+                         "cursorSortRegister", cursorId, txnId);
+        return true;
+    }
+
+    @Override
+    public boolean cursorSortAppend(long cursorId, byte[] key, byte[] value) {
+        mListener.notify(mType, "Redo %1$s: cursorId=%2$d, key=%3$s, value=%4$s",
+                         "cursorSortAppend", cursorId, keyStr(key), valueStr(value));
+        return true;
+    }
+
+    @Override
+    public boolean cursorSortGraft(long cursorId, long otherCursorId) {
+        mListener.notify(mType, "Redo %1$s: cursorId=%2$d, otherCursorId=%3$d",
+                         "cursorSortGraft", cursorId, otherCursorId);
+        return true;
+    }
+
+    @Override
+    public boolean cursorSortFinish(long cursorId, long indexId, byte[] name) {
+        mListener.notify(mType, "Redo %1$s: cursorId=%2$d, indexId=%3$d, name=%4$s",
+                         "cursorSortFinish", cursorId, indexId, keyStr(name));
+        return true;
+    }
+
+    @Override
     public boolean txnLockShared(long txnId, long indexId, byte[] key) {
         mListener.notify(mType, "Redo %1$s: txnId=%2$d, indexId=%3$d, key=%4$s",
                          "txnLockShared", txnId, indexId, keyStr(key));
