@@ -238,6 +238,9 @@ final class LocalDatabase extends AbstractDatabase {
 
     private volatile ExecutorService mSorterExecutor;
 
+    // Maps registered cursor ids to index ids.
+    private Tree mCursorRegistry;
+
     private volatile int mClosed;
     private volatile Throwable mClosedCause;
 
@@ -681,11 +684,13 @@ final class LocalDatabase extends AbstractDatabase {
                 }
             }
 
+            Tree cursorRegistry = null;
             if (openMode != OPEN_TEMP) {
                 Tree tree = openInternalTree(Tree.FRAGMENTED_TRASH_ID, false, config);
                 if (tree != null) {
                     mFragmentedTrash = new FragmentedTrash(tree);
                 }
+                cursorRegistry = openInternalTree(Tree.CURSOR_REGISTRY_ID, false, config);
             }
 
             // Limit maximum non-fragmented entry size to 0.75 of usable node size.
@@ -732,6 +737,21 @@ final class LocalDatabase extends AbstractDatabase {
                     }
                 }
 
+                LHashTable.Obj<TreeCursor> cursors = new LHashTable.Obj<>(4);
+                if (cursorRegistry != null) {
+                    Cursor c = cursorRegistry.newCursor(Transaction.BOGUS);
+                    for (c.first(); c.key() != null; c.next()) {
+                        long cursorId = decodeLongBE(c.key(), 0);
+                        long indexId = decodeLongBE(c.value(), 0);
+                        Tree tree = (Tree) anyIndexById(indexId);
+                        TreeCursor cursor = new TreeCursor(tree);
+                        cursor.mKeyOnly = true;
+                        cursor.mCursorId = cursorId;
+                        cursors.insert(cursorId).value = cursor;
+                    }
+                    cursorRegistry.forceClose();
+                }
+
                 if (mCustomTxnHandler != null) {
                     // Although handler shouldn't access the database yet, be safe and call
                     // this method at the point that the database is mostly functional. All
@@ -760,7 +780,7 @@ final class LocalDatabase extends AbstractDatabase {
                         }
                     } else {
                         ReplRedoEngine engine = new ReplRedoEngine
-                            (rm, config.mMaxReplicaThreads, this, txns);
+                            (rm, config.mMaxReplicaThreads, this, txns, cursors);
                         mRedoWriter = engine.initWriter(redoNum);
 
                         // Cannot start recovery until constructor is finished and final field
@@ -797,7 +817,7 @@ final class LocalDatabase extends AbstractDatabase {
                             RedoLog.deleteOldFile(config.mBaseFile, logId - i);
                         }
 
-                        RedoLogApplier applier = new RedoLogApplier(this, txns);
+                        RedoLogApplier applier = new RedoLogApplier(this, txns, cursors);
                         RedoLog replayLog = new RedoLog(config, logId, redoPos);
 
                         // As a side-effect, log id is set one higher than last file scanned.
@@ -2080,6 +2100,12 @@ final class LocalDatabase extends AbstractDatabase {
                 cursorCount += trash.mTrash.mRoot.countCursors();
             }
 
+            Tree cursorRegistry = mCursorRegistry;
+            if (cursorRegistry != null) {
+                // Count the cursors which are actively registering cursors. Sounds confusing.
+                cursorCount += cursorRegistry.mRoot.countCursors();
+            }
+
             stats.openIndexes = openTreesCount;
             stats.cursorCount = cursorCount;
 
@@ -2367,6 +2393,13 @@ final class LocalDatabase extends AbstractDatabase {
             }
         }
 
+        Tree cursorRegistry = mCursorRegistry;
+        if (cursorRegistry != null) {
+            if (!visitor.apply(cursorRegistry)) {
+                return false;
+            }
+        }
+
         Cursor all = indexRegistryByName().newCursor(null);
         try {
             for (all.first(); all.key() != null; all.next()) {
@@ -2505,6 +2538,10 @@ final class LocalDatabase extends AbstractDatabase {
                 if (trash != null) {
                     mFragmentedTrash = null;
                     trash.mTrash.forceClose();
+                }
+
+                if (mCursorRegistry != null) {
+                    mCursorRegistry.forceClose();
                 }
 
                 if (mRegistryKeyMap != null) {
@@ -2739,6 +2776,55 @@ final class LocalDatabase extends AbstractDatabase {
             mRegistry.delete(Transaction.BOGUS, tree.mIdBytes);
         } catch (Throwable e) {
             throw closeOnFailure(this, e);
+        }
+    }
+
+    /**
+     * Should be called before attempting to register a cursor, in case an exception is thrown.
+     */
+    Tree openCursorRegistry() throws IOException {
+        Tree cursorRegistry = mCursorRegistry;
+        if (cursorRegistry == null) {
+            mOpenTreesLatch.acquireExclusive();
+            try {
+                if ((cursorRegistry = mCursorRegistry) == null) {
+                    mCursorRegistry = cursorRegistry =
+                        openInternalTree(Tree.CURSOR_REGISTRY_ID, true);
+                }
+            } finally {
+                mOpenTreesLatch.releaseExclusive();
+            }
+        }
+
+        return cursorRegistry;
+    }
+
+    /**
+     * Should be called after the cursor id has been assigned, with the commit lock held.
+     */
+    void registerCursor(Tree cursorRegistry, TreeCursor cursor) throws IOException {
+        try {
+            byte[] cursorIdBytes = new byte[8];
+            encodeLongBE(cursorIdBytes, 0, cursor.mCursorId);
+            cursorRegistry.store(Transaction.BOGUS, cursorIdBytes, cursor.mTree.mIdBytes);
+        } catch (Throwable e) {
+            try {
+                cursor.unregister();
+            } catch (Throwable e2) {
+                suppress(e, e2);
+            }
+            throw e;
+        }
+    }
+
+    void unregisterCursor(TreeCursor cursor) {
+        try {
+            byte[] cursorIdBytes = new byte[8];
+            encodeLongBE(cursorIdBytes, 0, cursor.mCursorId);
+            openCursorRegistry().store(Transaction.BOGUS, cursorIdBytes, null);
+            cursor.mCursorId = 0;
+        } catch (Throwable e) {
+            // Database is borked, cleanup later.
         }
     }
 
