@@ -606,6 +606,7 @@ public interface Cursor extends ValueAccessor, Closeable {
      * @throws IllegalStateException if either cursor position is undefined at invocation time
      * @throws ViewConstraintException if value is not permitted in the target view
      */
+    // FIXME: Rename to ValueAccessor.valueMove(ValueAccessor target)
     public default void transferTo(Cursor target) throws IOException {
         ViewUtils.transfer(this, target);
     }
