@@ -3155,18 +3155,28 @@ final class _LocalDatabase extends AbstractDatabase {
 
             tree = newTreeInstance(treeId, treeIdBytes, name, root);
 
-            if (mIndexOpenListener != null) {
-                mIndexOpenListener.accept(this, tree);
-            }
-
-            _TreeRef treeRef = new _TreeRef(tree, mOpenTreesRefQueue);
-
-            mOpenTreesLatch.acquireExclusive();
             try {
-                mOpenTrees.put(name, treeRef);
-                mOpenTreesById.insert(treeId).value = treeRef;
-            } finally {
-                mOpenTreesLatch.releaseExclusive();
+                if (mIndexOpenListener != null) {
+                    mIndexOpenListener.accept(this, tree);
+                }
+
+                _TreeRef treeRef = new _TreeRef(tree, mOpenTreesRefQueue);
+
+                mOpenTreesLatch.acquireExclusive();
+                try {
+                    mOpenTrees.put(name, treeRef);
+                    try {
+                        mOpenTreesById.insert(treeId).value = treeRef;
+                    } catch (Throwable e) {
+                        mOpenTrees.remove(name);
+                        throw e;
+                    }
+                } finally {
+                    mOpenTreesLatch.releaseExclusive();
+                }
+            } catch (Throwable e) {
+                tree.close();
+                throw e;
             }
 
             return tree;
