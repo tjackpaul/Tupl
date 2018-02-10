@@ -18,7 +18,7 @@
     catch(err) {
     }
 //-->
-var methods = {"i0":18,"i1":18,"i2":18,"i3":18,"i4":18,"i5":18,"i6":6,"i7":18,"i8":18,"i9":6,"i10":18,"i11":6,"i12":6,"i13":6,"i14":6,"i15":18,"i16":6,"i17":18,"i18":18,"i19":18,"i20":18,"i21":18,"i22":18,"i23":18,"i24":18,"i25":18,"i26":18,"i27":18,"i28":18,"i29":18,"i30":18,"i31":18,"i32":18,"i33":18,"i34":18,"i35":18,"i36":18,"i37":18,"i38":18,"i39":18,"i40":18,"i41":18};
+var methods = {"i0":18,"i1":18,"i2":18,"i3":18,"i4":18,"i5":18,"i6":6,"i7":18,"i8":18,"i9":6,"i10":18,"i11":6,"i12":6,"i13":6,"i14":6,"i15":18,"i16":6,"i17":18,"i18":18,"i19":18,"i20":18,"i21":18,"i22":18,"i23":18,"i24":18,"i25":18,"i26":18,"i27":18,"i28":18,"i29":18,"i30":18,"i31":18,"i32":18,"i33":18,"i34":18,"i35":18,"i36":18,"i37":18,"i38":18,"i39":18,"i40":18,"i41":18,"i42":18};
 var tabs = {65535:["t0","All Methods"],2:["t2","Instance Methods"],4:["t3","Abstract Methods"],16:["t5","Default Methods"]};
 var altColor = "altColor";
 var rowColor = "rowColor";
@@ -305,6 +305,12 @@ var activeTableTab = "activeTableTab";
 </td>
 </tr>
 <tr id="i25" class="rowColor">
+<td class="colFirst"><code>default <a href="https://docs.oracle.com/javase/9/docs/api/java/lang/Object.html?is-external=true" title="class or interface in java.lang">Object</a></code></td>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#tryAddTrigger-org.cojen.tupl.Trigger-">tryAddTrigger</a></span>(<a href="../../../org/cojen/tupl/Trigger.html" title="interface in org.cojen.tupl">Trigger</a>&nbsp;trigger)</code>
+<div class="block">Try to add a trigger which is invoked before any modifications are made to this view.</div>
+</td>
+</tr>
+<tr id="i26" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/LockResult.html" title="enum in org.cojen.tupl">LockResult</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#tryLockExclusive-org.cojen.tupl.Transaction-byte:A-long-">tryLockExclusive</a></span>(<a href="../../../org/cojen/tupl/Transaction.html" title="interface in org.cojen.tupl">Transaction</a>&nbsp;txn,
                 byte[]&nbsp;key,
@@ -313,7 +319,7 @@ var activeTableTab = "activeTableTab";
  locks.</div>
 </td>
 </tr>
-<tr id="i26" class="altColor">
+<tr id="i27" class="rowColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/LockResult.html" title="enum in org.cojen.tupl">LockResult</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#tryLockShared-org.cojen.tupl.Transaction-byte:A-long-">tryLockShared</a></span>(<a href="../../../org/cojen/tupl/Transaction.html" title="interface in org.cojen.tupl">Transaction</a>&nbsp;txn,
              byte[]&nbsp;key,
@@ -321,7 +327,7 @@ var activeTableTab = "activeTableTab";
 <div class="block">Explicitly acquire a shared lock for the given key, denying exclusive locks.</div>
 </td>
 </tr>
-<tr id="i27" class="rowColor">
+<tr id="i28" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/LockResult.html" title="enum in org.cojen.tupl">LockResult</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#tryLockUpgradable-org.cojen.tupl.Transaction-byte:A-long-">tryLockUpgradable</a></span>(<a href="../../../org/cojen/tupl/Transaction.html" title="interface in org.cojen.tupl">Transaction</a>&nbsp;txn,
                  byte[]&nbsp;key,
@@ -330,7 +336,7 @@ var activeTableTab = "activeTableTab";
  additional upgradable locks.</div>
 </td>
 </tr>
-<tr id="i28" class="altColor">
+<tr id="i29" class="rowColor">
 <td class="colFirst"><code>default boolean</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#update-org.cojen.tupl.Transaction-byte:A-byte:A-">update</a></span>(<a href="../../../org/cojen/tupl/Transaction.html" title="interface in org.cojen.tupl">Transaction</a>&nbsp;txn,
       byte[]&nbsp;key,
@@ -339,7 +345,7 @@ var activeTableTab = "activeTableTab";
  existing value.</div>
 </td>
 </tr>
-<tr id="i29" class="rowColor">
+<tr id="i30" class="altColor">
 <td class="colFirst"><code>default boolean</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#update-org.cojen.tupl.Transaction-byte:A-byte:A-byte:A-">update</a></span>(<a href="../../../org/cojen/tupl/Transaction.html" title="interface in org.cojen.tupl">Transaction</a>&nbsp;txn,
       byte[]&nbsp;key,
@@ -349,7 +355,7 @@ var activeTableTab = "activeTableTab";
  existing value.</div>
 </td>
 </tr>
-<tr id="i30" class="altColor">
+<tr id="i31" class="rowColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewDifference-org.cojen.tupl.Combiner-org.cojen.tupl.View-">viewDifference</a></span>(<a href="../../../org/cojen/tupl/Combiner.html" title="interface in org.cojen.tupl">Combiner</a>&nbsp;combiner,
               <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a>&nbsp;second)</code>
@@ -358,21 +364,21 @@ var activeTableTab = "activeTableTab";
  difference</cite></a> of this view and a second one.</div>
 </td>
 </tr>
-<tr id="i31" class="rowColor">
+<tr id="i32" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewGe-byte:A-">viewGe</a></span>(byte[]&nbsp;key)</code>
 <div class="block">Returns a sub-view, backed by this one, whose keys are greater than or
  equal to the given key.</div>
 </td>
 </tr>
-<tr id="i32" class="altColor">
+<tr id="i33" class="rowColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewGt-byte:A-">viewGt</a></span>(byte[]&nbsp;key)</code>
 <div class="block">Returns a sub-view, backed by this one, whose keys are greater than the
  given key.</div>
 </td>
 </tr>
-<tr id="i33" class="rowColor">
+<tr id="i34" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewIntersection-org.cojen.tupl.Combiner-org.cojen.tupl.View-">viewIntersection</a></span>(<a href="../../../org/cojen/tupl/Combiner.html" title="interface in org.cojen.tupl">Combiner</a>&nbsp;combiner,
                 <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a>&nbsp;second)</code>
@@ -381,47 +387,47 @@ var activeTableTab = "activeTableTab";
  intersection</cite></a> of this view and a second one.</div>
 </td>
 </tr>
-<tr id="i34" class="altColor">
+<tr id="i35" class="rowColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewKeys--">viewKeys</a></span>()</code>
 <div class="block">Returns a view, backed by this one, which only provides the keys.</div>
 </td>
 </tr>
-<tr id="i35" class="rowColor">
+<tr id="i36" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewLe-byte:A-">viewLe</a></span>(byte[]&nbsp;key)</code>
 <div class="block">Returns a sub-view, backed by this one, whose keys are less than or
  equal to the given key.</div>
 </td>
 </tr>
-<tr id="i36" class="altColor">
+<tr id="i37" class="rowColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewLt-byte:A-">viewLt</a></span>(byte[]&nbsp;key)</code>
 <div class="block">Returns a sub-view, backed by this one, whose keys are less than the
  given key.</div>
 </td>
 </tr>
-<tr id="i37" class="rowColor">
+<tr id="i38" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewPrefix-byte:A-int-">viewPrefix</a></span>(byte[]&nbsp;prefix,
           int&nbsp;trim)</code>
 <div class="block">Returns a sub-view, backed by this one, whose keys start with the given prefix.</div>
 </td>
 </tr>
-<tr id="i38" class="altColor">
+<tr id="i39" class="rowColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewReverse--">viewReverse</a></span>()</code>
 <div class="block">Returns a view, backed by this one, whose natural order is reversed.</div>
 </td>
 </tr>
-<tr id="i39" class="rowColor">
+<tr id="i40" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewTransformed-org.cojen.tupl.Transformer-">viewTransformed</a></span>(<a href="../../../org/cojen/tupl/Transformer.html" title="interface in org.cojen.tupl">Transformer</a>&nbsp;transformer)</code>
 <div class="block">Returns a sub-view, backed by this one, whose entries have been filtered out and
  transformed.</div>
 </td>
 </tr>
-<tr id="i40" class="altColor">
+<tr id="i41" class="rowColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewUnion-org.cojen.tupl.Combiner-org.cojen.tupl.View-">viewUnion</a></span>(<a href="../../../org/cojen/tupl/Combiner.html" title="interface in org.cojen.tupl">Combiner</a>&nbsp;combiner,
          <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a>&nbsp;second)</code>
@@ -430,7 +436,7 @@ var activeTableTab = "activeTableTab";
  this view and a second one.</div>
 </td>
 </tr>
-<tr id="i41" class="rowColor">
+<tr id="i42" class="altColor">
 <td class="colFirst"><code>default <a href="../../../org/cojen/tupl/View.html" title="interface in org.cojen.tupl">View</a></code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/View.html#viewUnmodifiable--">viewUnmodifiable</a></span>()</code>
 <div class="block">Returns a view, backed by this one, whose entries cannot be modified.</div>
@@ -1378,6 +1384,22 @@ var activeTableTab = "activeTableTab";
 <pre>default&nbsp;boolean&nbsp;isModifyAtomic()</pre>
 <div class="block">Returns true if the value-modifying methods of this view are atomic, even when not using
  transactions.</div>
+</li>
+</ul>
+<a name="tryAddTrigger-org.cojen.tupl.Trigger-">
+<!--   -->
+</a>
+<ul class="blockList">
+<li class="blockList">
+<h4>tryAddTrigger</h4>
+<pre>default&nbsp;<a href="https://docs.oracle.com/javase/9/docs/api/java/lang/Object.html?is-external=true" title="class or interface in java.lang">Object</a>&nbsp;tryAddTrigger(<a href="../../../org/cojen/tupl/Trigger.html" title="interface in org.cojen.tupl">Trigger</a>&nbsp;trigger)</pre>
+<div class="block">Try to add a trigger which is invoked before any modifications are made to this view.
+ Triggers are invoked in stack order: the last added trigger is the first to be invoked.
+ Any exception thrown from a trigger is propagated up, and no more triggers are run.</div>
+<dl>
+<dt><span class="returnLabel">Returns:</span></dt>
+<dd>an opaque key for removing the trigger, or null if view doesn't allow triggers</dd>
+</dl>
 </li>
 </ul>
 <a name="addTrigger-org.cojen.tupl.Trigger-">

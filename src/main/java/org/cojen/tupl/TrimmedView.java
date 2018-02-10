@@ -224,8 +224,8 @@ final class TrimmedView implements View {
     }
 
     @Override
-    public Object addTrigger(Trigger trigger) {
-        return mSource.addTrigger(new WrappedTrigger(trigger) {
+    public Object tryAddTrigger(Trigger trigger) {
+        return mSource.tryAddTrigger(new WrappedTrigger(trigger) {
             @Override
             protected Cursor wrap(Cursor cursor) {
                 return new TrimmedCursor(TrimmedView.this, cursor);

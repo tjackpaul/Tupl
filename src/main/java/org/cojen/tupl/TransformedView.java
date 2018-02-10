@@ -458,8 +458,8 @@ final class TransformedView implements View {
     }
 
     @Override
-    public Object addTrigger(Trigger trigger) {
-        return mSource.addTrigger(new Trigger() {
+    public Object tryAddTrigger(Trigger trigger) {
+        return mSource.tryAddTrigger(new Trigger() {
             @Override
             public void store(Cursor cursor, byte[] value) throws IOException {
                 Transformer transformer = mTransformer;

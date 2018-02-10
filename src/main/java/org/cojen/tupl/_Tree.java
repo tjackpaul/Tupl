@@ -661,7 +661,7 @@ class _Tree implements View, Index {
     }
 
     @Override
-    public Object addTrigger(Trigger trigger) {
+    public Object tryAddTrigger(Trigger trigger) {
         // Adopts the same concurrent linked list design as used by _CursorFrame.bind.
 
         TriggerNode tnode = new TriggerNode(trigger);

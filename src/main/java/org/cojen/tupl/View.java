@@ -867,6 +867,17 @@ public interface View {
     }
 
     /**
+     * Try to add a trigger which is invoked before any modifications are made to this view.
+     * Triggers are invoked in stack order: the last added trigger is the first to be invoked.
+     * Any exception thrown from a trigger is propagated up, and no more triggers are run.
+     *
+     * @return an opaque key for removing the trigger, or null if view doesn't allow triggers
+     */
+    public default Object tryAddTrigger(Trigger trigger) {
+        return null;
+    }
+
+    /**
      * Add a trigger which is invoked before any modifications are made to this view. Triggers
      * are invoked in stack order: the last added trigger is the first to be invoked. Any
      * exception thrown from a trigger is propagated up, and no more triggers are run.
@@ -875,7 +886,11 @@ public interface View {
      * @throws UnsupportedOperationException if view doesn't allow triggers
      */
     public default Object addTrigger(Trigger trigger) {
-        throw new UnsupportedOperationException();
+        Object triggerKey = tryAddTrigger(trigger);
+        if (triggerKey == null) {
+            throw new UnsupportedOperationException();
+        }
+        return triggerKey;
     }
 
     /**

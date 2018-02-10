@@ -31,7 +31,7 @@ import java.util.Arrays;
  * <p>If the trigger must be invoked during recovery and replication, add it with a {@link
  * DatabaseConfig#indexOpenListener listener}. This ensures that no modifcations are missed.
  *
- * @see View#addTrigger View.addTrigger
+ * @see View#tryAddTrigger View.tryAddTrigger
  * @author Brian S O'Neill
  */
 public interface Trigger {
