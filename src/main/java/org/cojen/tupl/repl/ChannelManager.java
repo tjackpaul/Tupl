@@ -17,6 +17,9 @@
 
 package org.cojen.tupl.repl;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+
 import java.io.Closeable;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
@@ -38,14 +41,12 @@ import java.util.NavigableSet;
 import java.util.Set;
 import java.util.TreeSet;
 
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
-
 import java.util.function.Consumer;
 import java.util.function.LongPredicate;
 
 import java.util.zip.Checksum;
+import java.util.zip.CRC32C;
 
-import org.cojen.tupl.io.CRC32C;
 import org.cojen.tupl.util.Latch;
 
 import static org.cojen.tupl.io.Utils.*;
@@ -573,7 +574,7 @@ final class ChannelManager {
     }
 
     static void encodeHeaderCrc(byte[] header) {
-        Checksum crc = CRC32C.newInstance();
+        Checksum crc = new CRC32C();
         crc.update(header, 0, header.length - 4);
         encodeIntLE(header, header.length - 4, (int) crc.getValue());
     }
@@ -621,7 +622,7 @@ final class ChannelManager {
             return null;
         }
 
-        Checksum crc = CRC32C.newInstance();
+        Checksum crc = new CRC32C();
         crc.update(header, 0, header.length - 4);
         if (decodeIntLE(header, header.length - 4) != (int) crc.getValue()) {
             return null;
@@ -638,19 +639,28 @@ final class ChannelManager {
         for (SocketChannel channel : mChannels) {
             int state = channel.mWriteState;
             if (state >= channel.maxWriteTagCount()) {
-                if (cWriteStateUpdater.compareAndSet(channel, state, 0)) {
+                if (cWriteStateHandle.compareAndSet(channel, state, 0)) {
                     channel.closeSocket();
                 }
             } else if (state == 1) {
-                cWriteStateUpdater.compareAndSet(channel, 1, 2);
+                cWriteStateHandle.compareAndSet(channel, 1, 2);
             }
         }
 
         schedule(this::checkWrites, WRITE_CHECK_DELAY_MILLIS);
     }
 
-    static final AtomicIntegerFieldUpdater<SocketChannel> cWriteStateUpdater =
-        AtomicIntegerFieldUpdater.newUpdater(SocketChannel.class, "mWriteState");
+    static final VarHandle cWriteStateHandle;
+
+    static {
+        try {
+            cWriteStateHandle =
+                MethodHandles.lookup().findVarHandle
+                (SocketChannel.class, "mWriteState", int.class);
+        } catch (Throwable e) {
+            throw rethrow(e);
+        }
+    }
 
     abstract class SocketChannel extends Latch implements Channel, Closeable, Consumer<Socket> {
         final Peer mPeer;
