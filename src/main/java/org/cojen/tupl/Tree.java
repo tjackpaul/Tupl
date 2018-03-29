@@ -17,6 +17,9 @@
 
 package org.cojen.tupl;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.InterruptedIOException;
@@ -28,8 +31,6 @@ import java.util.Comparator;
 import java.nio.charset.StandardCharsets;
 
 import java.util.concurrent.ThreadLocalRandom;
-
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
 import static org.cojen.tupl.PageOps.*;
 import static org.cojen.tupl.Utils.*;
@@ -78,13 +79,21 @@ class Tree implements View, Index {
     // Linked stack of Triggers registered to this Tree.
     volatile TriggerNode mLastTrigger;
 
-    private static final AtomicReferenceFieldUpdater<Tree, TriggerNode>
-        cLastTriggerUpdater = AtomicReferenceFieldUpdater.newUpdater
-        (Tree.class, TriggerNode.class, "mLastTrigger");
+    private static final VarHandle cLastTriggerHandle, cNextHandle; 
 
-    private static final AtomicReferenceFieldUpdater<TriggerNode, TriggerNode>
-        cNextUpdater = AtomicReferenceFieldUpdater.newUpdater
-        (TriggerNode.class, TriggerNode.class, "mNext");
+    static {
+        try {
+            cLastTriggerHandle =
+                MethodHandles.lookup().findVarHandle
+                (Tree.class, "mLastTrigger", TriggerNode.class);
+
+            cNextHandle =
+                MethodHandles.lookup().findVarHandle
+                (TriggerNode.class, "mNext", TriggerNode.class);
+        } catch (Throwable e) {
+            throw rethrow(e);
+        }
+    }
 
     Tree(LocalDatabase db, long id, byte[] idBytes, Node root) {
         mDatabase = db;
@@ -673,11 +682,11 @@ class Tree implements View, Index {
             TriggerNode last = mLastTrigger;
             tnode.mPrev = last;
             if (last == null) {
-                if (cLastTriggerUpdater.compareAndSet(this, null, tnode)) {
+                if (cLastTriggerHandle.compareAndSet(this, null, tnode)) {
                     return tnode;
                 }
             } else if (last.mNext == last) {
-                if (cNextUpdater.compareAndSet(last, last, tnode)) {
+                if (cNextHandle.compareAndSet(last, last, tnode)) {
                     while (mLastTrigger != last);
                     mLastTrigger = tnode;
                     return tnode;
@@ -712,13 +721,13 @@ class Tree implements View, Index {
 
             if (n == tnode) {
                 // Removing the last trigger.
-                if (cNextUpdater.compareAndSet(tnode, n, null)) {
+                if (cNextHandle.compareAndSet(tnode, n, null)) {
                     // Update previous trigger to be the new last trigger.
                     TriggerNode p;
                     do {
                         p = tnode.mPrev;
                     } while (p != null && (p.mNext != tnode ||
-                                           !cNextUpdater.compareAndSet(p, tnode, p)));
+                                           !cNextHandle.compareAndSet(p, tnode, p)));
                     // Catch up before replacing the last trigger reference.
                     while (mLastTrigger != tnode);
                     mLastTrigger = p;
@@ -726,13 +735,13 @@ class Tree implements View, Index {
                 }
             } else {
                 // Uninstalling an interior or first trigger.
-                if (n.mPrev == tnode && cNextUpdater.compareAndSet(tnode, n, null)) {
+                if (n.mPrev == tnode && cNextHandle.compareAndSet(tnode, n, null)) {
                     // Update next reference chain to skip over the removed trigger.
                     TriggerNode p;
                     do {
                         p = tnode.mPrev;
                     } while (p != null && (p.mNext != tnode ||
-                                           !cNextUpdater.compareAndSet(p, tnode, n)));
+                                           !cNextHandle.compareAndSet(p, tnode, n)));
                     // Update previous reference chain to skip over the removed trigger.
                     n.mPrev = p;
                     return;
