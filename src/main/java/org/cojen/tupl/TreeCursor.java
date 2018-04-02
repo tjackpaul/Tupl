@@ -4211,6 +4211,8 @@ class TreeCursor extends AbstractValueAccessor implements CauseCloseable, Cursor
 
                 // FIXME: redo/undo with new "move" operation
                 // FIXME: honor the storeMode
+                // FIXME: move ghosts as ghosts; don't convert to null
+                // FIXME: prohibit replacing target value unless its a ghost
                 // FIXME: copy from source (don't reconstruct if fragmented)
                 // FIXME: delete from source (and allow merge)
                 // FIXME: latch target (source should have been released)

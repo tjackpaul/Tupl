@@ -101,12 +101,11 @@ public interface ValueAccessor extends Closeable {
     public void valueClear(long pos, long length) throws IOException;
 
     /**
-     * Atomically writes the value to the given target, and deletes it from this source. If the
-     * target already has a value, the move operation replaces it.
+     * Atomically writes the value to the given target, and deletes it from this source.
      *
      * @throws NullPointerException if target is null
-     * @throws IllegalStateException if source and target are incompatible, or if either
-     * accessor is closed
+     * @throws IllegalStateException if a target value exists, or if source and target are
+     * incompatible, or if either accessor is closed
      * @throws UnsupportedOperationException if not supported
      * @throws UnmodifiableViewException if source or target is read only
      */

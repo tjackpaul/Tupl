@@ -363,13 +363,12 @@ extends <a href="https://docs.oracle.com/javase/9/docs/api/java/io/Closeable.htm
 <h4>valueMove</h4>
 <pre>default&nbsp;void&nbsp;valueMove(<a href="../../../org/cojen/tupl/ValueAccessor.html" title="interface in org.cojen.tupl">ValueAccessor</a>&nbsp;target)
                 throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
-<div class="block">Atomically writes the value to the given target, and deletes it from this source. If the
- target already has a value, the move operation replaces it.</div>
+<div class="block">Atomically writes the value to the given target, and deletes it from this source.</div>
 <dl>
 <dt><span class="throwsLabel">Throws:</span></dt>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/NullPointerException.html?is-external=true" title="class or interface in java.lang">NullPointerException</a></code> - if target is null</dd>
-<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/IllegalStateException.html?is-external=true" title="class or interface in java.lang">IllegalStateException</a></code> - if source and target are incompatible, or if either
- accessor is closed</dd>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/IllegalStateException.html?is-external=true" title="class or interface in java.lang">IllegalStateException</a></code> - if a target value exists, or if source and target are
+ incompatible, or if either accessor is closed</dd>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/UnsupportedOperationException.html?is-external=true" title="class or interface in java.lang">UnsupportedOperationException</a></code> - if not supported</dd>
 <dd><code><a href="../../../org/cojen/tupl/UnmodifiableViewException.html" title="class in org.cojen.tupl">UnmodifiableViewException</a></code> - if source or target is read only</dd>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
