@@ -101,6 +101,20 @@ public interface ValueAccessor extends Closeable {
     public void valueClear(long pos, long length) throws IOException;
 
     /**
+     * Atomically writes the value to the given target, and deletes it from this source. If the
+     * target already has a value, the move operation replaces it.
+     *
+     * @throws NullPointerException if target is null
+     * @throws IllegalStateException if source and target are incompatible, or if either
+     * accessor is closed
+     * @throws UnsupportedOperationException if not supported
+     * @throws UnmodifiableViewException if source or target is read only
+     */
+    public default void valueMove(ValueAccessor target) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
      * Returns a new buffered InputStream instance, which reads from the value. When the
      * InputStream is closed, it closes the accessor too. The InputStream is bound to the
      * accessor, and so only one thread can access either at a time.

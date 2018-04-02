@@ -453,38 +453,38 @@ implements <a href="../../../org/cojen/tupl/Cursor.html" title="interface in org
 </tr>
 <tr id="i41" class="rowColor">
 <td class="colFirst"><code>void</code></td>
-<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/WrappedCursor.html#transferTo-org.cojen.tupl.Cursor-">transferTo</a></span>(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;target)</code>
-<div class="block">Always throws UnmodifiableViewException by default.</div>
-</td>
-</tr>
-<tr id="i42" class="altColor">
-<td class="colFirst"><code>void</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/WrappedCursor.html#unregister--">unregister</a></span>()</code>
 <div class="block">Unregisters the cursor for direct redo operations.</div>
 </td>
 </tr>
-<tr id="i43" class="rowColor">
+<tr id="i42" class="altColor">
 <td class="colFirst"><code>byte[]</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/WrappedCursor.html#value--">value</a></span>()</code>
 <div class="block">Returns an uncopied reference to the current value, which might be null or <a href="../../../org/cojen/tupl/Cursor.html#NOT_LOADED"><code>Cursor.NOT_LOADED</code></a>.</div>
 </td>
 </tr>
-<tr id="i44" class="altColor">
+<tr id="i43" class="rowColor">
 <td class="colFirst"><code>void</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/WrappedCursor.html#valueClear-long-long-">valueClear</a></span>(long&nbsp;pos,
           long&nbsp;length)</code>
 <div class="block">Always throws UnmodifiableViewException by default.</div>
 </td>
 </tr>
-<tr id="i45" class="rowColor">
+<tr id="i44" class="altColor">
 <td class="colFirst"><code>long</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/WrappedCursor.html#valueLength--">valueLength</a></span>()</code>
 <div class="block">Returns the total length of the accessed value.</div>
 </td>
 </tr>
-<tr id="i46" class="altColor">
+<tr id="i45" class="rowColor">
 <td class="colFirst"><code>void</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/WrappedCursor.html#valueLength-long-">valueLength</a></span>(long&nbsp;length)</code>
+<div class="block">Always throws UnmodifiableViewException by default.</div>
+</td>
+</tr>
+<tr id="i46" class="altColor">
+<td class="colFirst"><code>void</code></td>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/WrappedCursor.html#valueMove-org.cojen.tupl.ValueAccessor-">valueMove</a></span>(<a href="../../../org/cojen/tupl/ValueAccessor.html" title="interface in org.cojen.tupl">ValueAccessor</a>&nbsp;target)</code>
 <div class="block">Always throws UnmodifiableViewException by default.</div>
 </td>
 </tr>
@@ -684,6 +684,24 @@ implements <a href="../../../org/cojen/tupl/Cursor.html" title="interface in org
 <dd><code>length</code> - amount to clear</dd>
 <dt><span class="throwsLabel">Throws:</span></dt>
 <dd><code><a href="../../../org/cojen/tupl/IllegalUpgradeException.html" title="class in org.cojen.tupl">IllegalUpgradeException</a></code> - if not locked for writing</dd>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
+</dl>
+</li>
+</ul>
+<a name="valueMove-org.cojen.tupl.ValueAccessor-">
+<!--   -->
+</a>
+<ul class="blockList">
+<li class="blockList">
+<h4>valueMove</h4>
+<pre>public&nbsp;void&nbsp;valueMove(<a href="../../../org/cojen/tupl/ValueAccessor.html" title="interface in org.cojen.tupl">ValueAccessor</a>&nbsp;target)
+               throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
+<div class="block">Always throws UnmodifiableViewException by default.</div>
+<dl>
+<dt><span class="overrideSpecifyLabel">Specified by:</span></dt>
+<dd><code><a href="../../../org/cojen/tupl/ValueAccessor.html#valueMove-org.cojen.tupl.ValueAccessor-">valueMove</a></code>&nbsp;in interface&nbsp;<code><a href="../../../org/cojen/tupl/ValueAccessor.html" title="interface in org.cojen.tupl">ValueAccessor</a></code></dd>
+<dt><span class="throwsLabel">Throws:</span></dt>
+<dd><code><a href="../../../org/cojen/tupl/UnmodifiableViewException.html" title="class in org.cojen.tupl">UnmodifiableViewException</a></code> - if source or target is read only</dd>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
 </dl>
 </li>
@@ -1562,24 +1580,6 @@ implements <a href="../../../org/cojen/tupl/Cursor.html" title="interface in org
 <dd><code>value</code> - value to store; pass null to delete</dd>
 <dt><span class="throwsLabel">Throws:</span></dt>
 <dd><code><a href="../../../org/cojen/tupl/ViewConstraintException.html" title="class in org.cojen.tupl">ViewConstraintException</a></code> - if value is not permitted</dd>
-<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
-</dl>
-</li>
-</ul>
-<a name="transferTo-org.cojen.tupl.Cursor-">
-<!--   -->
-</a>
-<ul class="blockList">
-<li class="blockList">
-<h4>transferTo</h4>
-<pre>public&nbsp;void&nbsp;transferTo(<a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a>&nbsp;target)
-                throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
-<div class="block">Always throws UnmodifiableViewException by default.</div>
-<dl>
-<dt><span class="overrideSpecifyLabel">Specified by:</span></dt>
-<dd><code><a href="../../../org/cojen/tupl/Cursor.html#transferTo-org.cojen.tupl.Cursor-">transferTo</a></code>&nbsp;in interface&nbsp;<code><a href="../../../org/cojen/tupl/Cursor.html" title="interface in org.cojen.tupl">Cursor</a></code></dd>
-<dt><span class="throwsLabel">Throws:</span></dt>
-<dd><code><a href="../../../org/cojen/tupl/ViewConstraintException.html" title="class in org.cojen.tupl">ViewConstraintException</a></code> - if value is not permitted in the target view</dd>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
 </dl>
 </li>

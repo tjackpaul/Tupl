@@ -78,6 +78,14 @@ public abstract class WrappedCursor<C extends Cursor> implements Cursor {
     }
 
     /**
+     * Always throws UnmodifiableViewException by default.
+     */
+    @Override
+    public void valueMove(ValueAccessor target) throws IOException {
+        throw new UnmodifiableViewException();
+    }
+
+    /**
      * {@inheritDoc}
      */
     @Override
@@ -402,14 +410,6 @@ public abstract class WrappedCursor<C extends Cursor> implements Cursor {
      */
     @Override
     public void commit(byte[] value) throws IOException {
-        throw new UnmodifiableViewException();
-    }
-
-    /**
-     * Always throws UnmodifiableViewException by default.
-     */
-    @Override
-    public void transferTo(Cursor target) throws IOException {
         throw new UnmodifiableViewException();
     }
 

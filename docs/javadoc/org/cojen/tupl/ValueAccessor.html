@@ -18,8 +18,8 @@
     catch(err) {
     }
 //-->
-var methods = {"i0":6,"i1":6,"i2":6,"i3":6,"i4":6,"i5":6,"i6":6,"i7":6,"i8":6,"i9":6};
-var tabs = {65535:["t0","All Methods"],2:["t2","Instance Methods"],4:["t3","Abstract Methods"]};
+var methods = {"i0":6,"i1":6,"i2":6,"i3":6,"i4":6,"i5":6,"i6":6,"i7":6,"i8":18,"i9":6,"i10":6};
+var tabs = {65535:["t0","All Methods"],2:["t2","Instance Methods"],4:["t3","Abstract Methods"],16:["t5","Default Methods"]};
 var altColor = "altColor";
 var rowColor = "rowColor";
 var tableTab = "tableTab";
@@ -139,7 +139,7 @@ extends <a href="https://docs.oracle.com/javase/9/docs/api/java/io/Closeable.htm
 </a>
 <h3>Method Summary</h3>
 <table class="memberSummary" border="0" cellpadding="3" cellspacing="0" summary="Method Summary table, listing methods, and an explanation">
-<caption><span id="t0" class="activeTableTab"><span>All Methods</span><span class="tabEnd">&nbsp;</span></span><span id="t2" class="tableTab"><span><a href="javascript:show(2);">Instance Methods</a></span><span class="tabEnd">&nbsp;</span></span><span id="t3" class="tableTab"><span><a href="javascript:show(4);">Abstract Methods</a></span><span class="tabEnd">&nbsp;</span></span></caption>
+<caption><span id="t0" class="activeTableTab"><span>All Methods</span><span class="tabEnd">&nbsp;</span></span><span id="t2" class="tableTab"><span><a href="javascript:show(2);">Instance Methods</a></span><span class="tabEnd">&nbsp;</span></span><span id="t3" class="tableTab"><span><a href="javascript:show(4);">Abstract Methods</a></span><span class="tabEnd">&nbsp;</span></span><span id="t5" class="tableTab"><span><a href="javascript:show(16);">Default Methods</a></span><span class="tabEnd">&nbsp;</span></span></caption>
 <tr>
 <th class="colFirst" scope="col">Modifier and Type</th>
 <th class="colLast" scope="col">Method and Description</th>
@@ -196,6 +196,12 @@ extends <a href="https://docs.oracle.com/javase/9/docs/api/java/io/Closeable.htm
 </td>
 </tr>
 <tr id="i8" class="altColor">
+<td class="colFirst"><code>default void</code></td>
+<td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/ValueAccessor.html#valueMove-org.cojen.tupl.ValueAccessor-">valueMove</a></span>(<a href="../../../org/cojen/tupl/ValueAccessor.html" title="interface in org.cojen.tupl">ValueAccessor</a>&nbsp;target)</code>
+<div class="block">Atomically writes the value to the given target, and deletes it from this source.</div>
+</td>
+</tr>
+<tr id="i9" class="rowColor">
 <td class="colFirst"><code>int</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/ValueAccessor.html#valueRead-long-byte:A-int-int-">valueRead</a></span>(long&nbsp;pos,
          byte[]&nbsp;buf,
@@ -204,7 +210,7 @@ extends <a href="https://docs.oracle.com/javase/9/docs/api/java/io/Closeable.htm
 <div class="block">Read from the value, starting from any position.</div>
 </td>
 </tr>
-<tr id="i9" class="rowColor">
+<tr id="i10" class="altColor">
 <td class="colFirst"><code>void</code></td>
 <td class="colLast"><code><span class="memberNameLink"><a href="../../../org/cojen/tupl/ValueAccessor.html#valueWrite-long-byte:A-int-int-">valueWrite</a></span>(long&nbsp;pos,
           byte[]&nbsp;buf,
@@ -345,6 +351,27 @@ extends <a href="https://docs.oracle.com/javase/9/docs/api/java/io/Closeable.htm
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/IllegalArgumentException.html?is-external=true" title="class or interface in java.lang">IllegalArgumentException</a></code> - if position or length is negative</dd>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/IllegalStateException.html?is-external=true" title="class or interface in java.lang">IllegalStateException</a></code> - if closed</dd>
 <dd><code><a href="../../../org/cojen/tupl/IllegalUpgradeException.html" title="class in org.cojen.tupl">IllegalUpgradeException</a></code> - if not locked for writing</dd>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
+</dl>
+</li>
+</ul>
+<a name="valueMove-org.cojen.tupl.ValueAccessor-">
+<!--   -->
+</a>
+<ul class="blockList">
+<li class="blockList">
+<h4>valueMove</h4>
+<pre>default&nbsp;void&nbsp;valueMove(<a href="../../../org/cojen/tupl/ValueAccessor.html" title="interface in org.cojen.tupl">ValueAccessor</a>&nbsp;target)
+                throws <a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></pre>
+<div class="block">Atomically writes the value to the given target, and deletes it from this source. If the
+ target already has a value, the move operation replaces it.</div>
+<dl>
+<dt><span class="throwsLabel">Throws:</span></dt>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/NullPointerException.html?is-external=true" title="class or interface in java.lang">NullPointerException</a></code> - if target is null</dd>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/IllegalStateException.html?is-external=true" title="class or interface in java.lang">IllegalStateException</a></code> - if source and target are incompatible, or if either
+ accessor is closed</dd>
+<dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/lang/UnsupportedOperationException.html?is-external=true" title="class or interface in java.lang">UnsupportedOperationException</a></code> - if not supported</dd>
+<dd><code><a href="../../../org/cojen/tupl/UnmodifiableViewException.html" title="class in org.cojen.tupl">UnmodifiableViewException</a></code> - if source or target is read only</dd>
 <dd><code><a href="https://docs.oracle.com/javase/9/docs/api/java/io/IOException.html?is-external=true" title="class or interface in java.io">IOException</a></code></dd>
 </dl>
 </li>

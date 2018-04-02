@@ -596,22 +596,6 @@ public interface Cursor extends ValueAccessor, Closeable {
     }
 
     /**
-     * Transfers the current entry to another position, within this view or another view. If
-     * the target already has an entry, the transfer operation replaces it. Large values can be
-     * transferred efficiently by not performing a full copy, but only when autoload is
-     * disabled.
-     *
-     * @throws NullPointerException if target is null
-     * @throws IllegalArgumentException if transaction linkage doesn't match or is null
-     * @throws IllegalStateException if either cursor position is undefined at invocation time
-     * @throws ViewConstraintException if value is not permitted in the target view
-     */
-    // FIXME: Rename to ValueAccessor.valueMove(ValueAccessor target)
-    public default void transferTo(Cursor target) throws IOException {
-        ViewUtils.transfer(this, target);
-    }
-
-    /**
      * Returns a new independent Cursor, positioned where this one is, and
      * linked to the same transaction. The original and copied Cursor can be
      * acted upon without affecting each other's state.

@@ -61,6 +61,11 @@ final class ReverseCursor implements Cursor {
     }
 
     @Override
+    public void valueMove(ValueAccessor target) throws IOException {
+        mSource.valueMove(target);
+    }
+
+    @Override
     public InputStream newValueInputStream(long pos) throws IOException {
         return mSource.newValueInputStream(pos);
     }
@@ -283,11 +288,6 @@ final class ReverseCursor implements Cursor {
     @Override
     public void commit(byte[] value) throws IOException {
         mSource.commit(value);
-    }
-
-    @Override
-    public void transferTo(Cursor target) throws IOException {
-        mSource.transferTo(target);
     }
 
     @Override

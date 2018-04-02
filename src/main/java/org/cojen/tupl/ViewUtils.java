@@ -264,27 +264,6 @@ class ViewUtils {
         }
     }
 
-    static void transfer(Cursor source, Cursor target) throws IOException {
-        Transaction txn = target.link();
-        if (txn == null || txn != source.link()) {
-            throw new IllegalArgumentException();
-        }
-
-        txn.enter();
-        try {
-            byte[] value = source.value();
-            if (value == Cursor.NOT_LOADED) {
-                source.load();
-                value = source.value();
-            }
-            // Delete first, in case source and target positions are identical.
-            source.store(null);
-            target.commit(value);
-        } finally {
-            txn.exit();
-        }
-    }
-
     static void findNoLock(Cursor c, byte[] key) throws IOException {
         final boolean auto = c.autoload(false);
         final Transaction txn = c.link(Transaction.BOGUS);

@@ -39,24 +39,4 @@ final class TempTreeCursor extends TreeCursor {
         // Never redo.
         return 2;
     }
-
-    @Override
-    public void transferTo(Cursor target) throws IOException {
-        Transaction txn = target.link();
-        if (txn == null || txn != mTxn) {
-            throw new IllegalArgumentException();
-        }
-
-        final DurabilityMode dmode = txn.durabilityMode();
-        if (dmode == DurabilityMode.NO_REDO) {
-            super.transferTo(target);
-        } else {
-            txn.durabilityMode(DurabilityMode.NO_REDO);
-            try {
-                super.transferTo(target);
-            } finally {
-                txn.durabilityMode(dmode);
-            }
-        }
-    }
 }

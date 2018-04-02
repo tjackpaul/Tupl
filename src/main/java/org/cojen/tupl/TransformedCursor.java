@@ -515,18 +515,6 @@ final class TransformedCursor extends AbstractValueAccessor implements Cursor {
     }
 
     @Override
-    public void transferTo(Cursor target) throws IOException {
-        byte[] value = mValue;
-        if ((value != null && value != NOT_LOADED) || mTransformer.requireValue()) {
-            ViewUtils.transfer(this, target);
-        } else {
-            ViewUtils.positionCheck(mKey);
-            mSource.transferTo(target);
-            mValue = null;
-        }
-    }
-
-    @Override
     public Cursor copy() {
         TransformedCursor copy = new TransformedCursor(mSource.copy(), mTransformer);
         copy.mKey = Utils.cloneArray(mKey);

@@ -51,6 +51,11 @@ final class KeyOnlyCursor extends WrappedCursor<Cursor> {
     }
 
     @Override
+    public void valueMove(ValueAccessor target) throws IOException {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public InputStream newValueInputStream(long pos) throws IOException {
         return new InputStream() {
             @Override
