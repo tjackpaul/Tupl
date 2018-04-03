@@ -25,7 +25,6 @@ import org.cojen.tupl.ext.TransactionHandler;
  * 
  *
  * @author Brian S O'Neill
- * @see RedoLogRecovery
  */
 /*P*/
 final class RedoLogApplier implements RedoVisitor {
@@ -36,16 +35,21 @@ final class RedoLogApplier implements RedoVisitor {
 
     long mHighestTxnId;
 
-    RedoLogApplier(LocalDatabase db, LHashTable.Obj<LocalTransaction> txns) {
+    RedoLogApplier(LocalDatabase db, LHashTable.Obj<LocalTransaction> txns,
+                   LHashTable.Obj<TreeCursor> cursors)
+    {
         mDatabase = db;
         mTransactions = txns;
         mIndexes = new LHashTable.Obj<>(16);
-        mCursors = new LHashTable.Obj<>(4);
+        mCursors = cursors;
     }
 
     void resetCursors() {
         mCursors.traverse(entry -> {
-            entry.value.close();
+            TreeCursor cursor = entry.value;
+            // Unregister first, to prevent close from writing a redo log entry.
+            mDatabase.unregisterCursor(cursor);
+            cursor.close();
             return false;
         });
     }
@@ -126,6 +130,15 @@ final class RedoLogApplier implements RedoVisitor {
             ix.close();
         }
 
+        return true;
+    }
+
+    @Override
+    public boolean txnPrepare(long txnId) throws IOException {
+        LocalTransaction txn = txn(txnId);
+        if (txn != null) {
+            txn.prepareNoRedo();
+        }
         return true;
     }
 
@@ -278,7 +291,7 @@ final class RedoLogApplier implements RedoVisitor {
         if (entry != null) {
             LocalTransaction txn = txn(txnId);
             if (txn != null) {
-                readyCursorValueOp(entry, txn).setValueLength(length);
+                readyCursorValueOp(entry, txn).valueLength(length);
             }
         }
         return true;

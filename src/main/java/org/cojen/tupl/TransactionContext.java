@@ -42,11 +42,6 @@ final class TransactionContext extends Latch implements Flushable {
     private final static AtomicLongFieldUpdater<TransactionContext> cHighTxnIdUpdater =
         AtomicLongFieldUpdater.newUpdater(TransactionContext.class, "mHighTxnId");
 
-    private final static AtomicLongFieldUpdater<TransactionContext> cConfirmedPosUpdater =
-        AtomicLongFieldUpdater.newUpdater(TransactionContext.class, "mConfirmedPos");
-
-    private static final int SPIN_LIMIT = Runtime.getRuntime().availableProcessors();
-
     private final int mTxnStride;
 
     // Access to these fields is protected by synchronizing on this context object.
@@ -64,11 +59,6 @@ final class TransactionContext extends Latch implements Flushable {
     private RedoWriter mRedoWriter;
     private boolean mRedoWriterLatched;
     private long mRedoWriterPos;
-
-    // These fields capture the state of the highest confirmed commit, used by replication.
-    // Access to these fields is protected by spinning on the mConfirmedPos field.
-    private volatile long mConfirmedPos;
-    private long mConfirmedTxnId;
 
     /**
      * @param txnStride transaction id increment
@@ -290,6 +280,22 @@ final class TransactionContext extends Latch implements Flushable {
         }
     }
 
+    /**
+     * @return non-zero position if caller should call txnCommitSync
+     */
+    long redoPrepare(RedoWriter redo, long txnId, DurabilityMode mode) throws IOException {
+        mode = redo.opWriteCheck(mode);
+
+        acquireRedoLatch();
+        try {
+            redoWriteTxnOp(redo, OP_TXN_PREPARE, txnId);
+            redoWriteTerminator(redo);
+            return redoFlushCommit(mode);
+        } finally {
+            releaseRedoLatch();
+        }
+    }
+
     void redoEnter(RedoWriter redo, long txnId) throws IOException {
         redo.opWriteCheck(null);
 
@@ -489,8 +495,7 @@ final class TransactionContext extends Latch implements Flushable {
 
         acquireRedoLatch();
         try {
-            redoWriteTxnOp(redo, OP_CURSOR_STORE, cursorId);
-            redoWriteTxnId(txnId);
+            redoWriteCursorOp(redo, OP_CURSOR_STORE, cursorId, txnId);
             redoWriteUnsignedVarInt(key.length);
             redoWriteBytes(key, false);
             redoWriteUnsignedVarInt(value.length);
@@ -509,8 +514,7 @@ final class TransactionContext extends Latch implements Flushable {
 
         acquireRedoLatch();
         try {
-            redoWriteTxnOp(redo, OP_CURSOR_DELETE, cursorId);
-            redoWriteTxnId(txnId);
+            redoWriteCursorOp(redo, OP_CURSOR_DELETE, cursorId, txnId);
             redoWriteUnsignedVarInt(key.length);
             redoWriteBytes(key, true);
             redoWriteTerminator(redo);
@@ -526,8 +530,7 @@ final class TransactionContext extends Latch implements Flushable {
 
         acquireRedoLatch();
         try {
-            redoWriteTxnOp(redo, OP_CURSOR_FIND, cursorId);
-            redoWriteTxnId(txnId);
+            redoWriteCursorOp(redo, OP_CURSOR_FIND, cursorId, txnId);
             redoWriteUnsignedVarInt(key.length);
             redoWriteBytes(key, true);
             redoWriteTerminator(redo);
@@ -543,8 +546,7 @@ final class TransactionContext extends Latch implements Flushable {
 
         acquireRedoLatch();
         try {
-            redoWriteTxnOp(redo, OP_CURSOR_VALUE_SET_LENGTH, cursorId);
-            redoWriteTxnId(txnId);
+            redoWriteCursorOp(redo, OP_CURSOR_VALUE_SET_LENGTH, cursorId, txnId);
             redoWriteUnsignedVarLong(length);
             redoWriteTerminator(redo);
         } finally {
@@ -560,8 +562,7 @@ final class TransactionContext extends Latch implements Flushable {
 
         acquireRedoLatch();
         try {
-            redoWriteTxnOp(redo, OP_CURSOR_VALUE_WRITE, cursorId);
-            redoWriteTxnId(txnId);
+            redoWriteCursorOp(redo, OP_CURSOR_VALUE_WRITE, cursorId, txnId);
             redoWriteUnsignedVarLong(pos);
             redoWriteUnsignedVarInt(len);
             redoWriteBytes(buf, off, len, true);
@@ -578,8 +579,7 @@ final class TransactionContext extends Latch implements Flushable {
 
         acquireRedoLatch();
         try {
-            redoWriteTxnOp(redo, OP_CURSOR_VALUE_CLEAR, cursorId);
-            redoWriteTxnId(txnId);
+            redoWriteCursorOp(redo, OP_CURSOR_VALUE_CLEAR, cursorId, txnId);
             redoWriteUnsignedVarLong(pos);
             redoWriteUnsignedVarLong(length);
             redoWriteTerminator(redo);
@@ -930,22 +930,31 @@ final class TransactionContext extends Latch implements Flushable {
     }
 
     // Caller must hold redo latch.
-    private void redoWriteTxnId(long txnId) throws IOException {
+    private void redoWriteCursorOp(RedoWriter redo, byte op, long cursorId, long txnId)
+        throws IOException
+    {
+        if (redo != mRedoWriter) {
+            switchRedo(redo);
+        }
+
         byte[] buffer = mRedoBuffer;
         int pos = mRedoPos;
 
         prepare: {
-            if (pos > buffer.length - 9) { // up to 9 for txn delta
+            if (pos > buffer.length - ((1 + 9) << 1)) { // 2 ops and 2 deltas (max length)
                 redoFlush(false);
                 pos = 0;
             } else if (pos != 0) {
-                mRedoPos = Utils.encodeSignedVarLong(buffer, pos, txnId - mRedoLastTxnId);
+                buffer[pos] = op;
+                pos = Utils.encodeSignedVarLong(buffer, pos + 1, cursorId - mRedoLastTxnId);
                 break prepare;
             }
-            mRedoFirstTxnId = txnId;
-            mRedoPos = 9; // reserve 9 for txn delta
+            buffer[0] = op;
+            pos = 1 + 9;  // 1 for op, and reserve 9 for txn delta (cursorId actually)
+            mRedoFirstTxnId = cursorId;
         }
 
+        mRedoPos = Utils.encodeSignedVarLong(buffer, pos, txnId - cursorId);
         mRedoLastTxnId = txnId;
     }
 
@@ -1057,87 +1066,6 @@ final class TransactionContext extends Latch implements Flushable {
             mRedoWriterLatched = true;
         }
         return redo;
-    }
-
-    /**
-     * Only to be called when commit position which was confirmed doesn't have an associated
-     * transaction. Expected to only be used for replication control operations, so it doesn't
-     * need an optimized implementation.
-     */
-    void confirmed(long commitPos) {
-        if (commitPos == -1) {
-            throw new IllegalArgumentException();
-        }
-        mConfirmedPos = Math.max(latchConfirmed(), commitPos);
-    }
-
-    void confirmed(long commitPos, long txnId) {
-        if (commitPos == -1) {
-            throw new IllegalArgumentException();
-        }
-
-        long confirmedPos = mConfirmedPos;
-
-        check: {
-            if (confirmedPos != -1) {
-                if (commitPos <= confirmedPos) {
-                    return;
-                }
-                if (cConfirmedPosUpdater.compareAndSet(this, confirmedPos, -1)) {
-                    break check;
-                }
-            }
-
-            confirmedPos = latchConfirmed();
-
-            if (commitPos <= confirmedPos) {
-                // Release the latch.
-                mConfirmedPos = confirmedPos;
-                return;
-            }
-        }
-
-        mConfirmedTxnId = txnId;
-        // Set this last, because it releases the latch.
-        mConfirmedPos = commitPos;
-    }
-
-    /**
-     * Returns the context with the higher confirmed position.
-     */
-    TransactionContext higherConfirmed(TransactionContext other) {
-        return mConfirmedPos >= other.mConfirmedPos ? this : other;
-    }
-
-    /**
-     * Copy the confirmed position and transaction id to the returned array.
-     */
-    long[] copyConfirmed() {
-        long[] result = new long[2];
-        long confirmedPos = latchConfirmed();
-        result[0] = confirmedPos;
-        result[1] = mConfirmedTxnId;
-        // Release the latch.
-        mConfirmedPos = confirmedPos;
-        return result;
-    }
-
-    /**
-     * @return value of mConfirmedPos to set to release the latch
-     */
-    private long latchConfirmed() {
-        int trials = 0;
-        while (true) {
-            long confirmedPos = mConfirmedPos;
-            if (confirmedPos != -1 && cConfirmedPosUpdater.compareAndSet(this, confirmedPos, -1)) {
-                return confirmedPos;
-            }
-            trials++;
-            if (trials >= SPIN_LIMIT) {
-                Thread.yield();
-                trials = 0;
-            }
-        }
     }
 
     /**

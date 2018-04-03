@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 class CursorFrame extends AtomicReference<CursorFrame> {
     // Under contention a thread will initially spin up to SPIN_LIMIT before yielding, after
     // which it more aggressively spins up to 2 * SPIN_LIMIT before additional yields.
-    private static final int SPIN_LIMIT = Runtime.getRuntime().availableProcessors() > 1 ? 1 << 10 : 0;
+    static final int SPIN_LIMIT = Runtime.getRuntime().availableProcessors() > 1 ? 1 << 10 : 0;
 
     private static final CursorFrame REBIND_FRAME = new CursorFrame();
 
@@ -373,14 +373,7 @@ class CursorFrame extends AtomicReference<CursorFrame> {
     }
 
     /**
-     * Returns the parent frame. No latch is required.
-     */
-    final CursorFrame peek() {
-        return mParentFrame;
-    }
-
-    /**
-     * Pop this, the leaf frame, returning the parent frame. No latch is required.
+     * Pop this frame, returning the parent frame. No latch is required.
      */
     final CursorFrame pop() {
         unbind(null);
@@ -392,7 +385,7 @@ class CursorFrame extends AtomicReference<CursorFrame> {
     }
 
     /**
-     * Pop this, the leaf frame, returning void. No latch is required.
+     * Pop this frame, returning void. No latch is required.
      */
     final void popv() {
         unbind(null);

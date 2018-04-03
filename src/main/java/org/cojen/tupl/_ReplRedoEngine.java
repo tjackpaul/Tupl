@@ -77,7 +77,8 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
      * @param txns recovered transactions; can be null; cleared as a side-effect
      */
     _ReplRedoEngine(ReplicationManager manager, int maxThreads,
-                   _LocalDatabase db, LHashTable.Obj<_LocalTransaction> txns)
+                   _LocalDatabase db, LHashTable.Obj<_LocalTransaction> txns,
+                   LHashTable.Obj<_TreeCursor> cursors)
         throws IOException
     {
         if (maxThreads <= 0) {
@@ -127,7 +128,21 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
 
         mIndexes = new LHashTable.Obj<>(16);
 
-        mCursors = new CursorTable(4);
+        final CursorTable cursorTable;
+        if (cursors == null) {
+            cursorTable = new CursorTable(4);
+        } else {
+            cursorTable = new CursorTable(cursors.size());
+
+            cursors.traverse(ce -> {
+                long scrambledCursorId = mix(ce.key);
+                cursorTable.insert(scrambledCursorId).mCursor = ce.value;
+                // Delete entry.
+                return true;
+            });
+        }
+
+        mCursors = cursorTable;
     }
 
     public _RedoWriter initWriter(long redoNum) {
@@ -163,15 +178,38 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
 
     @Override
     public boolean reset() throws IOException {
-        // Reset and discard all transactions.
-        mTransactions.traverse(te -> {
-            runTask(te, new Worker.Task() {
-                public void run() throws IOException {
-                    te.mTxn.recoveryCleanup(true);
-                }
+        doReset();
+        return true;
+    }
+
+    /**
+     * @return remaining 2PC transactions, or null if none
+     */
+    private LHashTable.Obj<_LocalTransaction> doReset() throws IOException {
+        // Reset and discard all non-2PC transactions.
+
+        final LHashTable.Obj<_LocalTransaction> remaining;
+
+        if (mTransactions.size() == 0) {
+            remaining = null;
+        } else {
+            remaining = new LHashTable.Obj<>(16); 
+
+            mTransactions.traverse(te -> {
+                runTask(te, new Worker.Task() {
+                    public void run() throws IOException {
+                        _LocalTransaction txn = te.mTxn;
+                        if (!txn.recoveryCleanup(true)) {
+                            synchronized (remaining) {
+                                remaining.insert(te.key).value = txn;
+                            }
+                        }
+                    }
+                });
+
+                return true;
             });
-            return true;
-        });
+        }
 
         // Wait for work to complete.
         if (mWorkerGroup != null) {
@@ -180,17 +218,24 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
 
         synchronized (mCursors) {
             mCursors.traverse(entry -> {
-                entry.mCursor.close();
+                _TreeCursor cursor = entry.mCursor;
+                // Unregister first, to prevent close from writing a redo log entry.
+                mDatabase.unregisterCursor(cursor);
+                cursor.close();
                 return true;
             });
         }
 
-        // Although it might seem like a good time to clean out any lingering trash, concurrent
-        // transactions are still active and need the trash to rollback properly. Waiting for
-        // the worker group to finish isn't sufficient. Not all transactions are replicated.
-        //mDatabase.emptyAllFragmentedTrash(false);
+        if (remaining == null || remaining.size() == 0) {
+            return null;
+        }
 
-        return true;
+        remaining.traverse(entry -> {
+            mTransactions.insert(entry.key).mTxn = entry.value;
+            return false;
+        });
+
+        return remaining;
     }
 
     @Override
@@ -344,6 +389,19 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
                         // Index will get fully deleted when database is re-opened.
                     }
                 }
+            }
+        });
+
+        return true;
+    }
+
+    @Override
+    public boolean txnPrepare(long txnId) throws IOException {
+        TxnEntry te = getTxnEntry(txnId);
+
+        runTask(te, new Worker.Task() {
+            public void run() throws IOException {
+                te.mTxn.prepareNoRedo();
             }
         });
 
@@ -582,7 +640,7 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
         Index ix = getIndex(indexId);
         if (ix != null) {
             _TreeCursor tc = (_TreeCursor) ix.newCursor(Transaction.BOGUS);
-            tc.autoload(false);
+            tc.mKeyOnly = true;
             synchronized (mCursors) {
                 mCursors.insert(scrambledCursorId).mCursor = tc;
             }
@@ -716,7 +774,7 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
 
                 do {
                     try {
-                        tc.setValueLength(length);
+                        tc.valueLength(length);
                         break;
                     } catch (ClosedIndexException e) {
                         tc = reopenCursor(e, ce);
@@ -1180,7 +1238,7 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
             tc.reset();
 
             tc = (_TreeCursor) ix.newCursor(txn);
-            tc.autoload(false);
+            tc.mKeyOnly = true;
             tc.mTxn = txn;
             tc.find(key);
 
@@ -1212,6 +1270,7 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
 
     private void decode() {
         final ReplRedoDecoder decoder = mDecoder;
+        LHashTable.Obj<_LocalTransaction> remaining;
 
         try {
             while (!decoder.run(this));
@@ -1223,8 +1282,8 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
                 mWorkerGroup.join(false);
             }
 
-            // Rollback any lingering transactions.
-            reset();
+            // Rollback any lingering non-2PC transactions.
+            remaining = doReset();
         } catch (Throwable e) {
             fail(e);
             return;
@@ -1232,13 +1291,21 @@ class _ReplRedoEngine implements RedoVisitor, ThreadFactory {
             decoder.mDeactivated = true;
         }
 
+        _RedoWriter redo;
+
         try {
-            mController.leaderNotify();
+            redo = mController.leaderNotify();
         } catch (UnmodifiableReplicaException e) {
             // Should already be receiving again due to this exception.
+            return;
         } catch (Throwable e) {
             // Could try to switch to receiving mode, but panic seems to be the safe option.
             closeQuietly(mDatabase, e);
+            return;
+        }
+
+        if (mDatabase.shouldInvokeRecoveryHandler(remaining) && redo != null) {
+            mDatabase.invokeRecoveryHandler(remaining, redo);
         }
     }
 

@@ -43,7 +43,8 @@ public interface View {
     }
 
     /**
-     * @param txn optional transaction for Cursor to {@link Cursor#link link} to
+     * @param txn optional transaction for Cursor to {@link Cursor#link link} to; pass null for
+     * auto-commit mode
      * @return a new unpositioned cursor
      * @throws IllegalArgumentException if transaction belongs to another database instance
      */
@@ -52,7 +53,7 @@ public interface View {
     /**
      * Returns a new scanner over this view.
      *
-     * @param txn optional transaction for Scanner to use
+     * @param txn optional transaction for Scanner to use; pass null for auto-commit mode
      * @return a new scanner positioned at the first entry in the view
      * @throws IllegalArgumentException if transaction belongs to another database instance
      */
@@ -68,7 +69,7 @@ public interface View {
      * a null transaction are auto-committed and become visible to other transactions as the
      * updater moves along.
      *
-     * @param txn optional transaction for Updater to use
+     * @param txn optional transaction for Updater to use; pass null for auto-commit mode
      * @return a new updater positioned at the first entry in the view
      * @throws IllegalArgumentException if transaction belongs to another database instance
      */
@@ -208,6 +209,7 @@ public interface View {
      * @throws ViewConstraintException if entry is not permitted
      */
     public default void store(Transaction txn, byte[] key, byte[] value) throws IOException {
+        txn = ViewUtils.enterScope(this, txn);
         Cursor c = newCursor(txn);
         try {
             c.autoload(false);
@@ -218,8 +220,9 @@ public interface View {
                 }
                 throw new ViewConstraintException();
             }
-            c.store(value);
+            c.commit(value);
         } finally {
+            txn.exit();
             c.reset();
         }
     }
@@ -239,6 +242,7 @@ public interface View {
      * @throws ViewConstraintException if entry is not permitted
      */
     public default byte[] exchange(Transaction txn, byte[] key, byte[] value) throws IOException {
+        txn = ViewUtils.enterScope(this, txn);
         Cursor c = newCursor(txn);
         try {
             c.find(key);
@@ -250,16 +254,18 @@ public interface View {
             }
             // NOTE: Not atomic with BOGUS transaction.
             byte[] old = c.value();
-            c.store(value);
+            c.commit(value);
             return old;
         } finally {
+            txn.exit();
             c.reset();
         }
     }
 
     /**
      * Associates a value with the given key, unless a corresponding value already
-     * exists. Equivalent to: {@link #update update(txn, key, null, value)}
+     * exists. Equivalent to: {@link #update(Transaction, byte[], byte[], byte[]) update(txn,
+     * key, null, value)}
      *
      * <p>If the entry must be locked, ownership of the key instance is transferred. The key
      * must not be modified after calling this method.
@@ -291,6 +297,7 @@ public interface View {
      * @throws ViewConstraintException if entry is not permitted
      */
     public default boolean replace(Transaction txn, byte[] key, byte[] value) throws IOException {
+        txn = ViewUtils.enterScope(this, txn);
         Cursor c = newCursor(txn);
         try {
             c.autoload(false);
@@ -302,9 +309,10 @@ public interface View {
             if (c.value() == null) {
                 return false;
             }
-            c.store(value);
+            c.commit(value);
             return true;
         } finally {
+            txn.exit();
             c.reset();
         }
     }
@@ -325,6 +333,7 @@ public interface View {
      * @throws ViewConstraintException if entry is not permitted
      */
     public default boolean update(Transaction txn, byte[] key, byte[] value) throws IOException {
+        txn = ViewUtils.enterScope(this, txn);
         Cursor c = newCursor(txn);
         try {
             c.find(key);
@@ -335,9 +344,10 @@ public interface View {
             if (Arrays.equals(c.value(), value)) {
                 return false;
             }
-            c.store(value);
+            c.commit(value);
             return true;
         } finally {
+            txn.exit();
             c.reset();
         }
     }
@@ -361,6 +371,7 @@ public interface View {
     public default boolean update(Transaction txn, byte[] key, byte[] oldValue, byte[] newValue)
         throws IOException
     {
+        txn = ViewUtils.enterScope(this, txn);
         Cursor c = newCursor(txn);
         try {
             c.autoload(oldValue != null);
@@ -373,10 +384,11 @@ public interface View {
                 return false;
             }
             if (oldValue != null || newValue != null) {
-                c.store(newValue);
+                c.commit(newValue);
             }
             return true;
         } finally {
+            txn.exit();
             c.reset();
         }
     }
@@ -401,7 +413,8 @@ public interface View {
 
     /**
      * Removes the entry associated with the given key, but only if the given value
-     * matches. Equivalent to: {@link #update update(txn, key, value, null)}
+     * matches. Equivalent to: {@link #update(Transaction, byte[], byte[], byte[]) update(txn,
+     * key, value, null)}
      *
      * <p>If the entry must be locked, ownership of the key instance is transferred. The key
      * must not be modified after calling this method.
@@ -741,10 +754,13 @@ public interface View {
     }
 
     /**
-     * Returns a view which represents the <i>set union</i> of this view and a second one. A
-     * union eliminates duplicate keys, by relying on a combiner to decide how to deal with
-     * them. If the combiner chooses to {@link Combiner#discard discard} duplicate keys, then
-     * the returned view represents the <i>symmetric set difference</i> instead.
+     * Returns a view which represents the <a
+     * href="https://en.wikipedia.org/wiki/Union_(set_theory)"><cite>set union</cite></a> of
+     * this view and a second one. A union eliminates duplicate keys, by relying on a combiner
+     * to decide how to deal with them. If the combiner chooses to {@link Combiner#discard
+     * discard} duplicate keys, then the returned view represents the <a
+     * href="https://en.wikipedia.org/wiki/Symmetric_difference"><cite>symmetric set
+     * difference</cite></a> instead.
      *
      * <p>Storing entries in the union is permitted, if the combiner supports {@link
      * Combiner#separate separation}. The separator must supply at least one non-null value, or
@@ -765,9 +781,10 @@ public interface View {
     }
 
     /**
-     * Returns a view which represents the <i>set intersection</i> of this view and a second
-     * one. An intersection eliminates duplicate keys, by relying on a combiner to decide how
-     * to deal with them.
+     * Returns a view which represents the <a
+     * href="https://en.wikipedia.org/wiki/Intersection_(set_theory)"><cite>set
+     * intersection</cite></a> of this view and a second one. An intersection eliminates
+     * duplicate keys, by relying on a combiner to decide how to deal with them.
      *
      * <p>Storing entries in the intersection is permitted, if the combiner supports {@link
      * Combiner#separate separation}. The separator must supply two non-null values, or else a
@@ -788,9 +805,10 @@ public interface View {
     }
 
     /**
-     * Returns a view which represents the <i>set difference</i> of this view and a second
-     * one. A difference eliminates duplicate keys, by relying on a combiner to decide how to
-     * deal with them.
+     * Returns a view which represents the <a
+     * href="https://en.wikipedia.org/wiki/Complement_(set_theory)#Relative_complement"><cite>set
+     * difference</cite></a> of this view and a second one. A difference eliminates duplicate
+     * keys, by relying on a combiner to decide how to deal with them.
      *
      * <p>Storing entries in the difference is permitted, if the combiner supports {@link
      * Combiner#separate separation}.  The separator must supply a non-null first value, or
@@ -839,4 +857,12 @@ public interface View {
      * UnmodifiableViewException} to be thrown.
      */
     public boolean isUnmodifiable();
+
+    /**
+     * Returns true if the value-modifying methods of this view are atomic, even when not using
+     * transactions.
+     */
+    public default boolean isModifyAtomic() {
+        return false;
+    }
 }

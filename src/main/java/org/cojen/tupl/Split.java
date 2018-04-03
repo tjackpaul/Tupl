@@ -34,19 +34,39 @@ final class Split {
     // reason, Split is always constructed with a copied key.
 
     private byte[] mFullKey;
-    private byte[] mActualKey;
+    private byte[] mActualKey; // might be fragmented
 
     Split(boolean splitRight, Node sibling) {
         mSplitRight = splitRight;
         mSibling = sibling;
     }
 
+    /**
+     * Set full and actual key.
+     */
     final void setKey(Split split) {
         mFullKey = split.mFullKey;
         mActualKey = split.mActualKey;
     }
 
-    final void setKey(byte[] fullKey, byte[] actualKey) {
+    /**
+     * Set full and actual key.
+     */
+    final void setKey(Tree tree, byte[] fullKey) throws IOException {
+        setKey(tree.mDatabase, fullKey);
+    }
+
+    /**
+     * Set full and actual key.
+     */
+    final void setKey(LocalDatabase db, byte[] fullKey) throws IOException {
+        byte[] actualKey = fullKey;
+
+        if (Node.calculateAllowedKeyLength(db, fullKey) < 0) {
+            // Key must be fragmented.
+            actualKey = db.fragmentKey(fullKey);
+        }
+
         mFullKey = fullKey;
         mActualKey = actualKey;
     }
@@ -59,8 +79,8 @@ final class Split {
     }
 
     /**
-     * Compares to the split key, returning <0 if given key is lower, 0 if
-     * equal, >0 if greater.
+     * {@literal Compares to the split key, returning <0 if given key is lower, 0 if
+     * equal, >0 if greater.}
      */
     final int compare(byte[] key) {
         return Utils.compareUnsigned(key, 0, key.length, mFullKey, 0, mFullKey.length);

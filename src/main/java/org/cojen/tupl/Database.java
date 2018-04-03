@@ -23,6 +23,8 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.Serializable;
 
+import java.util.concurrent.Executor;
+
 import java.nio.charset.StandardCharsets;
 
 import org.cojen.tupl.io.CauseCloseable;
@@ -220,6 +222,14 @@ public interface Database extends CauseCloseable, Flushable {
      * {@link DatabaseConfig#durabilityMode default} is used.
      */
     public abstract Transaction newTransaction(DurabilityMode durabilityMode);
+
+    /**
+     * Returns a new Sorter instance, which uses the given executor for running parallel
+     * tasks. Pass null to use a default executor. The standard algorithm is a parallel
+     * external mergesort, which attempts to use all available processors. All external storage
+     * is maintained in the database itself, in the form of temporary indexes.
+     */
+    public abstract Sorter newSorter(Executor executor) throws IOException;
 
     /**
      * Preallocates pages for immediate use. The actual amount allocated

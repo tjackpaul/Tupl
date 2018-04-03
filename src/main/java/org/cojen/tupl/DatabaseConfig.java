@@ -35,6 +35,9 @@ import java.util.TreeMap;
 
 import java.util.concurrent.TimeUnit;
 
+import java.util.function.BiConsumer;
+
+import org.cojen.tupl.ext.RecoveryHandler;
 import org.cojen.tupl.ext.ReplicationManager;
 import org.cojen.tupl.ext.TransactionHandler;
 
@@ -67,6 +70,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
     FileFactory mFileFactory;
     long mMinCachedBytes;
     long mMaxCachedBytes;
+    transient RecoveryHandler mRecoveryHandler;
     long mSecondaryCacheSize;
     DurabilityMode mDurabilityMode;
     LockUpgradeRule mLockUpgradeRule;
@@ -75,6 +79,7 @@ public class DatabaseConfig implements Cloneable, Serializable {
     long mCheckpointSizeThreshold;
     long mCheckpointDelayThresholdNanos;
     transient EventListener mEventListener;
+    BiConsumer<Database, Index> mIndexOpenListener;
     boolean mFileSync;
     boolean mReadOnly;
     int mPageSize;
@@ -302,11 +307,20 @@ public class DatabaseConfig implements Cloneable, Serializable {
     }
 
     /**
-     * Set a listener which receives notifications of actions being performed
-     * by the database.
+     * Set a listener which receives notifications of actions being performed by the
+     * database. Listener implementation must be thread-safe.
      */
     public DatabaseConfig eventListener(EventListener listener) {
         mEventListener = listener;
+        return this;
+    }
+
+    /**
+     * Set a listener which is called when named indexes are opened. Listener implementation
+     * must be thread-safe.
+     */
+    public DatabaseConfig indexOpenListener(BiConsumer<Database, Index> listener) {
+        mIndexOpenListener = listener;
         return this;
     }
 
@@ -391,6 +405,20 @@ public class DatabaseConfig implements Cloneable, Serializable {
      */
     public DatabaseConfig maxReplicaThreads(int num) {
         mMaxReplicaThreads = num;
+        return this;
+    }
+
+    /**
+     * Install a transaction recovery handler, which receives unfinished transactions which
+     * were {@link Transaction#prepare prepared} for two-phase commit. When replication is
+     * configured, the handler is invoked when the database has become the replication leader.
+     * Otherwise, the handler is invoked when the database is opened. The handler is
+     * responsible for finishing the transactions, by completing the necessary commit actions,
+     * or by fully rolling back. All unfinished transactions are passed to the handler via a
+     * single dedicated thread.
+     */
+    public DatabaseConfig recoveryHandler(RecoveryHandler handler) {
+        mRecoveryHandler = handler;
         return this;
     }
 
