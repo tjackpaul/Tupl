@@ -1,14 +1,26 @@
 Changelog
 =========
 
-v1.4.1
+v1.4.3 (2018-04-14)
 ------
+* Added maxCheckpointThreads option, which can speed up checkpoints.
 
+v1.4.2 (2018-03-11)
+------
+* Fix temporary stall when calling the sorter progress method. The finish method didn't stop
+  all the internal sorts as quickly as possible.
+* Add feature to listen for when indexes are opened.
+* Log events when running the verify and compact tools, and also allow the cache size to be set.
+
+v1.4.1 (2018-02-02)
+------
+* Fix bug when using the new cursor registration feature. When the database is restarted,
+  registered cursors could get lost, causing redo operations against them to be lost too.
 * Honor the default durability mode when using a null transaction. Previously, when the default
   mode is NO_REDO and the transaction is null, a redo log entry would still be created. Also
   honor the transaction-specified durability mode when using the unsafe locking mode. Previously,
   the default durability mode would be used.
-* Added support two-phase commit, using the new transaction prepare and getId methods.
+* Added support for two-phase commit, using the new transaction prepare and getId methods.
 * Added a parallel external mergesort utility.
 
 v1.4.0.2 (2018-01-21)

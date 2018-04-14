@@ -41,7 +41,7 @@ class Tree implements View, Index {
     static final int
         REGISTRY_ID = 0,
         REGISTRY_KEY_MAP_ID = 1,
-        //PAGE_ALLOCATOR_ID = 2,
+        CURSOR_REGISTRY_ID = 2,
         FRAGMENTED_TRASH_ID = 3,
         MAX_RESERVED_ID = 0xff;
 
@@ -1660,7 +1660,7 @@ class Tree implements View, Index {
     }
 
     /**
-     * @see Database#markDirty
+     * @see LocalDatabase#markDirty
      */
     final boolean markDirty(Node node) throws IOException {
         return mDatabase.markDirty(this, node);

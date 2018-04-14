@@ -79,7 +79,7 @@ final class Node extends Clutch implements DatabaseAccess {
 
     static final int ENTRY_FRAGMENTED = 0x40;
 
-    // Context this node belongs to, for tracking dirty nodes and most recentl used nodes.
+    // Context this node belongs to, for tracking dirty nodes and most recently used nodes.
     final NodeContext mContext;
 
     // Links within usage list, guarded by NodeContext.
@@ -1525,7 +1525,7 @@ final class Node extends Clutch implements DatabaseAccess {
 
     /**
      * @param pos position as provided by binarySearch; must be positive
-     * @param stats [0]: full length, [1]: number of pages (>0 if fragmented)
+     * @param stats {@literal [0]: full length, [1]: number of pages (>0 if fragmented)}
      */
     void retrieveKeyStats(int pos, long[] stats) throws IOException {
         final /*P*/ byte[] page = mPage;
@@ -1801,7 +1801,7 @@ final class Node extends Clutch implements DatabaseAccess {
 
     /**
      * @param pos position as provided by binarySearch; must be positive
-     * @param stats [0]: full length, [1]: number of pages (>0 if fragmented)
+     * @param stats {@literal [0]: full length, [1]: number of pages (>0 if fragmented)}
      */
     void retrieveLeafValueStats(int pos, long[] stats) throws IOException {
         final /*P*/ byte[] page = mPage;
@@ -5711,7 +5711,7 @@ final class Node extends Clutch implements DatabaseAccess {
     /**
      * @param pos two-based position in search vector
      * @param endPos two-based exclusive end position in search vector
-     * @param halfPos (endPos >>> 1) & ~1
+     * @param halfPos {@literal (endPos >>> 1) & ~1}
      */
     private void siftDownLeaf(int pos, int endPos, int halfPos) throws IOException {
         final /*P*/ byte[] page = mPage;
