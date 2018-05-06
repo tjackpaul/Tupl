@@ -35,6 +35,8 @@ import java.util.TreeMap;
 
 import java.util.concurrent.TimeUnit;
 
+import java.util.function.BiConsumer;
+
 import org.cojen.tupl.ext.RecoveryHandler;
 import org.cojen.tupl.ext.ReplicationManager;
 import org.cojen.tupl.ext.TransactionHandler;
@@ -76,7 +78,9 @@ public class DatabaseConfig implements Cloneable, Serializable {
     long mCheckpointRateNanos;
     long mCheckpointSizeThreshold;
     long mCheckpointDelayThresholdNanos;
+    int mMaxCheckpointThreads;
     transient EventListener mEventListener;
+    BiConsumer<Database, Index> mIndexOpenListener;
     boolean mFileSync;
     boolean mReadOnly;
     int mPageSize;
@@ -304,8 +308,20 @@ public class DatabaseConfig implements Cloneable, Serializable {
     }
 
     /**
-     * Set a listener which receives notifications of actions being performed
-     * by the database.
+     * Specify the maximum number of threads for performing checkpointing, to speed it up. This
+     * option is most useful when combined with the {@link #syncWrites syncWrites} option, or
+     * when using {@link OpenOption#DIRECT_IO DIRECT_IO}. The default number of threads is
+     * one. If a negative number is provided, the actual number applied is {@code (-num *
+     * availableProcessors)}.
+     */
+    public DatabaseConfig maxCheckpointThreads(int num) {
+        mMaxCheckpointThreads = num;
+        return this;
+    }
+
+    /**
+     * Set a listener which receives notifications of actions being performed by the
+     * database. Listener implementation must be thread-safe.
      */
     public DatabaseConfig eventListener(EventListener listener) {
         mEventListener = listener;
@@ -313,10 +329,20 @@ public class DatabaseConfig implements Cloneable, Serializable {
     }
 
     /**
-     * Set true to ensure all writes to the main database file are immediately
-     * durable, although not checkpointed. This option typically reduces
-     * overall performance, but checkpoints complete more quickly. As a result,
-     * the main database file requires less pre-allocated pages and is smaller.
+     * Set a listener which is called when named indexes are opened. Listener implementation
+     * must be thread-safe.
+     */
+    public DatabaseConfig indexOpenListener(BiConsumer<Database, Index> listener) {
+        mIndexOpenListener = listener;
+        return this;
+    }
+
+    /**
+     * Set true to ensure all writes to the main database file are immediately durable,
+     * although not checkpointed. This option typically reduces overall performance, but
+     * checkpoints complete more quickly. As a result, the main database file requires less
+     * pre-allocated pages and is smaller. Also consider specifying more {@link
+     * #maxCheckpointThreads checkpoint threads} when using this option.
      */
     public DatabaseConfig syncWrites(boolean fileSync) {
         mFileSync = fileSync;

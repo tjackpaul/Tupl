@@ -51,7 +51,6 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
@@ -59,6 +58,8 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 
 import java.util.concurrent.locks.ReentrantLock;
+
+import java.util.function.BiConsumer;
 
 import static java.lang.System.arraycopy;
 
@@ -201,6 +202,7 @@ final class LocalDatabase extends AbstractDatabase {
     private final Map<byte[], TreeRef> mOpenTrees;
     private final LHashTable.Obj<TreeRef> mOpenTreesById;
     private final ReferenceQueue<Tree> mOpenTreesRefQueue;
+    private final BiConsumer<Database, Index> mIndexOpenListener;
 
     // Map of all loaded nodes.
     private final Node[] mNodeMapTable;
@@ -225,7 +227,7 @@ final class LocalDatabase extends AbstractDatabase {
 
     private long mLastCheckpointNanos;
 
-    private volatile Checkpointer mCheckpointer;
+    private final Checkpointer mCheckpointer;
 
     final TempFileManager mTempFileManager;
 
@@ -290,7 +292,6 @@ final class LocalDatabase extends AbstractDatabase {
         config.durabilityMode(DurabilityMode.NO_FLUSH);
         LocalDatabase db = new LocalDatabase(config, OPEN_TEMP);
         tfm.register(file, db);
-        db.mCheckpointer = new Checkpointer(db, config);
         db.mCheckpointer.start(false);
         return db.mRegistry;
     }
@@ -300,6 +301,7 @@ final class LocalDatabase extends AbstractDatabase {
      */
     private LocalDatabase(DatabaseConfig config, int openMode) throws IOException {
         config.mEventListener = mEventListener = SafeEventListener.makeSafe(config.mEventListener);
+        mIndexOpenListener = config.mIndexOpenListener;
 
         mCustomTxnHandler = config.mTxnHandler;
         mRecoveryHandler = config.mRecoveryHandler;
@@ -704,9 +706,19 @@ final class LocalDatabase extends AbstractDatabase {
             mFragmentInodeLevelCaps = calculateInodeLevelCaps(mPageSize);
 
             long recoveryStart = 0;
-            if (mBaseFile == null || openMode == OPEN_TEMP) {
+            if (mBaseFile == null) {
                 mRedoWriter = null;
+                mCheckpointer = null;
+            } else if (openMode == OPEN_TEMP) {
+                mRedoWriter = null;
+                mCheckpointer = new Checkpointer(this, config, mNodeContexts.length);
             } else {
+                if (debugListener != null) {
+                    mCheckpointer = null;
+                } else {
+                    mCheckpointer = new Checkpointer(this, config, mNodeContexts.length);
+                }
+
                 // Perform recovery by examining redo and undo logs.
 
                 if (mEventListener != null) {
@@ -905,17 +917,14 @@ final class LocalDatabase extends AbstractDatabase {
      * Post construction, allow additional threads access to the database.
      */
     private void finishInit(DatabaseConfig config) throws IOException {
-        if (mRedoWriter == null && mTempFileManager == null) {
+        if (mCheckpointer == null) {
             // Nothing is durable and nothing to ever clean up.
             return;
         }
 
-        Checkpointer c = new Checkpointer(this, config);
-        mCheckpointer = c;
-
         // Register objects to automatically shutdown.
-        c.register(new RedoClose(this));
-        c.register(mTempFileManager);
+        mCheckpointer.register(new RedoClose(this));
+        mCheckpointer.register(mTempFileManager);
 
         if (mRedoWriter instanceof ReplRedoWriter) {
             // Need to do this after mRedoWriter is assigned, ensuring that trees are opened as
@@ -924,7 +933,7 @@ final class LocalDatabase extends AbstractDatabase {
         }
 
         if (config.mCachePriming && mPageDb.isDurable() && !mReadOnly) {
-            c.register(new ShutdownPrimer(this));
+            mCheckpointer.register(new ShutdownPrimer(this));
         }
 
         // Must tag the trashed trees before starting replication and recovery. Otherwise,
@@ -977,7 +986,7 @@ final class LocalDatabase extends AbstractDatabase {
             initialCheckpoint = true;
         }
 
-        c.start(initialCheckpoint);
+        mCheckpointer.start(initialCheckpoint);
 
         LHashTable.Obj<LocalTransaction> txns = mRecoveredTransactions;
         if (txns != null) {
@@ -2440,22 +2449,20 @@ final class LocalDatabase extends AbstractDatabase {
             }
         }
 
-        Thread ct = null;
         boolean lockedCheckpointer = false;
+        final Checkpointer c = mCheckpointer;
 
         try {
-            Checkpointer c = mCheckpointer;
-
             if (shutdown) {
                 mCheckpointLock.lock();
                 lockedCheckpointer = true;
                 checkpoint(true, 0, 0);
                 if (c != null) {
-                    ct = c.close(cause);
+                    c.close(cause);
                 }
             } else {
                 if (c != null) {
-                    ct = c.close(cause);
+                    c.close(cause);
                 }
 
                 // Wait for any in-progress checkpoint to complete.
@@ -2472,9 +2479,7 @@ final class LocalDatabase extends AbstractDatabase {
                 }
             }
         } finally {
-            if (ct != null) {
-                ct.interrupt();
-            }
+            Thread ct = c == null ? null : c.interrupt();
 
             if (lockedCheckpointer) {
                 mCheckpointLock.unlock();
@@ -2491,8 +2496,6 @@ final class LocalDatabase extends AbstractDatabase {
         }
 
         try {
-            mCheckpointer = null;
-
             CommitLock lock = mCommitLock;
 
             if (mOpenTrees != null) {
@@ -3127,9 +3130,13 @@ final class LocalDatabase extends AbstractDatabase {
 
         // Use a transaction to ensure that only one thread loads the requested tree. Nothing
         // is written into it.
-        Transaction txn = newNoRedoTransaction();
+        Transaction txn = threadLocalTransaction(DurabilityMode.NO_REDO);
         try {
             txn.lockTimeout(-1, null);
+
+            if (txn.lockCheck(mRegistry.getId(), treeIdBytes) != LockResult.UNOWNED) {
+                throw new LockFailureException("Index open listener self deadlock");
+            }
 
             // Pass the transaction to acquire the lock.
             byte[] rootIdBytes = mRegistry.load(txn, treeIdBytes);
@@ -3146,14 +3153,29 @@ final class LocalDatabase extends AbstractDatabase {
             Node root = loadTreeRoot(treeId, rootId);
 
             tree = newTreeInstance(treeId, treeIdBytes, name, root);
-            TreeRef treeRef = new TreeRef(tree, mOpenTreesRefQueue);
 
-            mOpenTreesLatch.acquireExclusive();
             try {
-                mOpenTrees.put(name, treeRef);
-                mOpenTreesById.insert(treeId).value = treeRef;
-            } finally {
-                mOpenTreesLatch.releaseExclusive();
+                if (mIndexOpenListener != null) {
+                    mIndexOpenListener.accept(this, tree);
+                }
+
+                TreeRef treeRef = new TreeRef(tree, mOpenTreesRefQueue);
+
+                mOpenTreesLatch.acquireExclusive();
+                try {
+                    mOpenTrees.put(name, treeRef);
+                    try {
+                        mOpenTreesById.insert(treeId).value = treeRef;
+                    } catch (Throwable e) {
+                        mOpenTrees.remove(name);
+                        throw e;
+                    }
+                } finally {
+                    mOpenTreesLatch.releaseExclusive();
+                }
+            } catch (Throwable e) {
+                tree.close();
+                throw e;
             }
 
             return tree;
@@ -4343,7 +4365,7 @@ final class LocalDatabase extends AbstractDatabase {
      *
      * @param value can be null if value is all zeros
      * @param max maximum allowed size for returned byte array; must not be
-     * less than 11 (can be 9 if full value length is < 65536)
+     * less than 11 {@literal (can be 9 if full value length is < 65536)}
      * @param maxInline maximum allowed inline size; must not be more than 65535
      * @return null if max is too small
      */
@@ -4686,7 +4708,8 @@ final class LocalDatabase extends AbstractDatabase {
     /**
      * Reconstruct a fragmented value.
      *
-     * @param stats non-null for stats: [0]: full length, [1]: number of pages (>0 if fragmented)
+     * @param stats non-null for stats: [0]: full length, [1]: number of pages
+     * {@literal (>0 if fragmented)}
      * @return null if stats requested
      */
     byte[] reconstruct(/*P*/ byte[] fragmented, int off, int len, long[] stats)
@@ -5367,9 +5390,7 @@ final class LocalDatabase extends AbstractDatabase {
         }
 
         try {
-            for (NodeContext context : mNodeContexts) {
-                context.flushDirty(stateToFlush);
-            }
+            mCheckpointer.flushDirty(mNodeContexts, stateToFlush);
 
             if (mRedoWriter != null) {
                 mRedoWriter.checkpointFlushed();
