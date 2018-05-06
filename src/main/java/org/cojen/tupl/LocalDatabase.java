@@ -51,7 +51,6 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
@@ -228,7 +227,7 @@ final class LocalDatabase extends AbstractDatabase {
 
     private long mLastCheckpointNanos;
 
-    private volatile Checkpointer mCheckpointer;
+    private final Checkpointer mCheckpointer;
 
     final TempFileManager mTempFileManager;
 
@@ -293,7 +292,6 @@ final class LocalDatabase extends AbstractDatabase {
         config.durabilityMode(DurabilityMode.NO_FLUSH);
         LocalDatabase db = new LocalDatabase(config, OPEN_TEMP);
         tfm.register(file, db);
-        db.mCheckpointer = new Checkpointer(db, config);
         db.mCheckpointer.start(false);
         return db.mRegistry;
     }
@@ -708,9 +706,19 @@ final class LocalDatabase extends AbstractDatabase {
             mFragmentInodeLevelCaps = calculateInodeLevelCaps(mPageSize);
 
             long recoveryStart = 0;
-            if (mBaseFile == null || openMode == OPEN_TEMP) {
+            if (mBaseFile == null) {
                 mRedoWriter = null;
+                mCheckpointer = null;
+            } else if (openMode == OPEN_TEMP) {
+                mRedoWriter = null;
+                mCheckpointer = new Checkpointer(this, config, mNodeContexts.length);
             } else {
+                if (debugListener != null) {
+                    mCheckpointer = null;
+                } else {
+                    mCheckpointer = new Checkpointer(this, config, mNodeContexts.length);
+                }
+
                 // Perform recovery by examining redo and undo logs.
 
                 if (mEventListener != null) {
@@ -909,17 +917,14 @@ final class LocalDatabase extends AbstractDatabase {
      * Post construction, allow additional threads access to the database.
      */
     private void finishInit(DatabaseConfig config) throws IOException {
-        if (mRedoWriter == null && mTempFileManager == null) {
+        if (mCheckpointer == null) {
             // Nothing is durable and nothing to ever clean up.
             return;
         }
 
-        Checkpointer c = new Checkpointer(this, config);
-        mCheckpointer = c;
-
         // Register objects to automatically shutdown.
-        c.register(new RedoClose(this));
-        c.register(mTempFileManager);
+        mCheckpointer.register(new RedoClose(this));
+        mCheckpointer.register(mTempFileManager);
 
         if (mRedoWriter instanceof ReplRedoWriter) {
             // Need to do this after mRedoWriter is assigned, ensuring that trees are opened as
@@ -928,7 +933,7 @@ final class LocalDatabase extends AbstractDatabase {
         }
 
         if (config.mCachePriming && mPageDb.isDurable() && !mReadOnly) {
-            c.register(new ShutdownPrimer(this));
+            mCheckpointer.register(new ShutdownPrimer(this));
         }
 
         // Must tag the trashed trees before starting replication and recovery. Otherwise,
@@ -981,7 +986,7 @@ final class LocalDatabase extends AbstractDatabase {
             initialCheckpoint = true;
         }
 
-        c.start(initialCheckpoint);
+        mCheckpointer.start(initialCheckpoint);
 
         LHashTable.Obj<LocalTransaction> txns = mRecoveredTransactions;
         if (txns != null) {
@@ -2444,22 +2449,20 @@ final class LocalDatabase extends AbstractDatabase {
             }
         }
 
-        Thread ct = null;
         boolean lockedCheckpointer = false;
+        final Checkpointer c = mCheckpointer;
 
         try {
-            Checkpointer c = mCheckpointer;
-
             if (shutdown) {
                 mCheckpointLock.lock();
                 lockedCheckpointer = true;
                 checkpoint(true, 0, 0);
                 if (c != null) {
-                    ct = c.close(cause);
+                    c.close(cause);
                 }
             } else {
                 if (c != null) {
-                    ct = c.close(cause);
+                    c.close(cause);
                 }
 
                 // Wait for any in-progress checkpoint to complete.
@@ -2476,9 +2479,7 @@ final class LocalDatabase extends AbstractDatabase {
                 }
             }
         } finally {
-            if (ct != null) {
-                ct.interrupt();
-            }
+            Thread ct = c == null ? null : c.interrupt();
 
             if (lockedCheckpointer) {
                 mCheckpointLock.unlock();
@@ -2495,8 +2496,6 @@ final class LocalDatabase extends AbstractDatabase {
         }
 
         try {
-            mCheckpointer = null;
-
             CommitLock lock = mCommitLock;
 
             if (mOpenTrees != null) {
@@ -5391,9 +5390,7 @@ final class LocalDatabase extends AbstractDatabase {
         }
 
         try {
-            for (NodeContext context : mNodeContexts) {
-                context.flushDirty(stateToFlush);
-            }
+            mCheckpointer.flushDirty(mNodeContexts, stateToFlush);
 
             if (mRedoWriter != null) {
                 mRedoWriter.checkpointFlushed();
